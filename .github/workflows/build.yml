@@ -1,0 +1,48 @@
+name: Build Windows app
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tools
+        run: python -m pip install pytest pyinstaller
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Build WoodWopLabeling.exe
+        run: pyinstaller --onefile --windowed --name WoodWopLabeling app.py
+
+      - name: Self-test the finished exe on a copy of the samples
+        run: ./dist/WoodWopLabeling.exe --selftest samples
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WoodWopLabeling
+          path: dist/WoodWopLabeling.exe
+
+      - name: Publish download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/WoodWopLabeling.exe \
+            --target "$GITHUB_SHA" \
+            --title "Wood WOP Labeling - latest build" \
+            --notes "Built from ${GITHUB_REF_NAME} @ ${GITHUB_SHA::7}. Download WoodWopLabeling.exe below. Tests and the exe self-test passed before publishing."
