@@ -1,16 +1,15 @@
 """Add a part-size label to woodWOP .mpr part programs without touching any machining.
 
-The label goes in three places, none of which the machine ever runs:
+The label is the part's length x width in inches (e.g. ``95 1/4 x 12``). It is
+written in two places, neither of which the machine ever runs:
 
-1. **Drawn on the part** as contour lines spelling the size (and job / part
-   under it). A woodWOP contour is only geometry; the machine cuts a contour
-   only when a routing operation points at it, and nothing ever points at
-   these. Each character is one open line, so it can never look like a cutout.
-2. A ``LABEL`` entry in the part's variable list (``[001``) with the label text
-   as its comment. Its value is the number of drawn label contours, which is
-   how the drawing is found again for updating or removing it.
-3. A woodWOP comment (``<101 \\Kommentar\\``) right after the workpiece block,
-   shown in woodWOP's list of operations.
+1. **Drawn on the part** as contour lines. A woodWOP contour is only geometry;
+   the machine cuts a contour only when a routing operation points at it, and
+   nothing ever points at these. Each character is one open line, so it can
+   never look like a cutout.
+2. A ``LABEL`` entry in the part's variable list (``[001``) with the size as its
+   comment. Its value is the number of drawn label contours, which is how the
+   drawing is found again for updating or removing it.
 
 Every other byte of the file stays exactly as it was. Before anything is
 saved, the new file is checked line by line against the original: only label
@@ -38,8 +37,8 @@ MM_PER_INCH = 25.4
 FRACTION_DENOMINATOR = 16  # round inch sizes to the nearest 1/16"
 
 LABEL_VAR_RE = re.compile(r'^LABEL="(\d+)"$')  # value = number of drawn label contours
-COMMENT_HEADER = "<101 \\Kommentar\\"
-LABEL_KM_RE = re.compile(r'^KM="SIZE [^"]* \| JOB [^"]*"$')
+COMMENT_HEADER = "<101 \\Kommentar\\"  # only written by the first test version; removed on relabel
+LABEL_KM_RE = re.compile(r'^KM="SIZE \d[^"]*"$')
 SECTION_START = ("[", "]", "<", "$", "!")
 MPR_SUFFIXES = (".mpr",)
 
@@ -66,23 +65,20 @@ class LabelError(Exception):
 class PartInfo:
     length_mm: float
     width_mm: float
-    thickness_mm: float
-    job: str | None
-    part: str
 
     @property
     def size_text(self) -> str:
-        return " x ".join(inches_text(v) for v in (self.length_mm, self.width_mm, self.thickness_mm))
+        """Length x width in inches, e.g. '95 1/4 x 12'."""
+        return f"{inches_text(self.length_mm)} x {inches_text(self.width_mm)}"
 
     @property
     def label(self) -> str:
-        return f"SIZE {self.size_text} IN | JOB {self.job or 'UNKNOWN'} | PART {self.part}"
+        return f"SIZE {self.size_text}"
 
     @property
     def drawing(self) -> list[list[Point]]:
-        """The label as polylines on the part (mm), one per character. [] if the part is too small."""
-        second = f"JOB {self.job} {self.part}" if self.job else self.part
-        return stroke_font.layout(self.length_mm, self.width_mm, self.size_text, second)
+        """The size as polylines on the part (mm), one per character. [] if the part is too small."""
+        return stroke_font.layout(self.length_mm, self.width_mm, self.size_text)
 
 
 @dataclass
@@ -99,41 +95,14 @@ class Result:
 
 
 def inches_text(mm: float) -> str:
-    """2419.35 -> '95-1/4', 304.8 -> '12', 19.5 -> '3/4' (nearest 1/16")."""
+    """2419.35 -> '95 1/4', 304.8 -> '12', 19.5 -> '3/4' (nearest 1/16")."""
     steps = int(math.floor(mm / MM_PER_INCH * FRACTION_DENOMINATOR + 0.5))
     whole, rem = divmod(steps, FRACTION_DENOMINATOR)
     if rem == 0:
         return str(whole)
     g = math.gcd(rem, FRACTION_DENOMINATOR)
     frac = f"{rem // g}/{FRACTION_DENOMINATOR // g}"
-    return f"{whole}-{frac}" if whole else frac
-
-
-def clean_text(s: str) -> str:
-    """Keep label text to plain printable ASCII with no double quotes."""
-    return re.sub(r"[^\x20-\x7E]", "?", s).replace('"', "'")
-
-
-def parse_file_name(stem: str) -> tuple[str | None, str]:
-    """Job number and part name from a file name.
-
-    WHE_TABBY_1071128_ROSENBAUM_SHARI_L_CEP_U12_X1 -> ('1071128', 'CEP U12 X1')
-
-    The job number is the first run of 5+ digits. The part name starts at the
-    token just before the unit (U12) and runs to the end. With no unit token
-    the part name is everything after the job number.
-    """
-    tokens = [t for t in re.split(r"[_\s]+", stem) if t]
-    job_i = next((i for i, t in enumerate(tokens) if re.fullmatch(r"\d{5,}", t)), None)
-    if job_i is None:
-        return None, clean_text(" ".join(tokens)) or "?"
-    rest = tokens[job_i + 1 :]
-    unit_i = next(
-        (i for i in range(len(rest) - 1, -1, -1) if re.fullmatch(r"U\d+[A-Z]?", rest[i], re.IGNORECASE)),
-        None,
-    )
-    part = rest[unit_i - 1 :] if unit_i else rest
-    return tokens[job_i], clean_text(" ".join(part)) or "?"
+    return f"{whole} {frac}" if whole else frac
 
 
 # ---------------------------------------------------------------- file structure
@@ -382,8 +351,7 @@ def strip_label(lines: list[str]) -> list[str]:
 
 def label_lines(label: str, drawing: list[list[Point]], first_contour: int) -> list[str]:
     """Every line the label adds, for checking what was inserted."""
-    km = f'KM="{label}"'
-    out = [f'LABEL="{len(drawing)}"', km, COMMENT_HEADER, km, ""]
+    out = [f'LABEL="{len(drawing)}"', f'KM="{label}"']
     for k, poly in enumerate(drawing):
         out += contour_lines(first_contour + k, poly)
     return out
@@ -409,17 +377,6 @@ def insert_label(lines: list[str], label: str, drawing: list[list[Point]]) -> li
             block += contour_lines(first + k, poly)
         out[at:at] = block
 
-    # Comment component right after the workpiece block.
-    w = find_line(out, "<100 \\WerkStck\\")
-    if w is not None:
-        e = block_end(out, w)
-        at = e + 1 if e < len(out) and out[e] == "" else e
-    else:
-        at = next((i for i, x in enumerate(out) if x.startswith("<") or x == "!"), None)
-        if at is None:
-            raise LabelError("no place found for the comment")
-    out[at:at] = [COMMENT_HEADER, km, ""]
-
     # LABEL variable at the end of the variable list.
     var = [f'LABEL="{len(drawing)}"', km]
     v = find_line(out, "[001")
@@ -437,7 +394,7 @@ def insert_label(lines: list[str], label: str, drawing: list[list[Point]]) -> li
     return out
 
 
-def label_bytes(data: bytes, file_name: str) -> Result:
+def label_bytes(data: bytes) -> Result:
     """Work out the labeled version of one part file. Nothing is written here."""
     try:
         lines, nl = split_lines(data)
@@ -446,9 +403,10 @@ def label_bytes(data: bytes, file_name: str) -> Result:
         if is_sheet(lines):
             check = check_sheet(lines)
             return Result(PROBLEM if check.dangers else SHEET, check.message)
-        length, width, thick = read_size(lines)
-        job, part = parse_file_name(Path(file_name).stem)
-        info = PartInfo(length, width, thick, job, part)
+        if next((x for x in reversed(lines) if x.strip()), "") != "!":
+            raise LabelError("file looks incomplete (no end mark); it may still be saving")
+        length, width, _ = read_size(lines)
+        info = PartInfo(length, width)
         drawing = info.drawing
 
         base = strip_label(lines)
@@ -526,8 +484,7 @@ def verify(old: bytes, new: bytes, label: str, drawing: list[list[Point]]) -> No
         raise LabelError("safety check failed: something other than the label would change")
 
     # Router safety: the operations and what they cut must be exactly as before.
-    ops_now = sorted(x for x in new_lines if x.startswith("<"))
-    if ops_now != sorted([x for x in kept if x.startswith("<")] + [COMMENT_HEADER]):
+    if [x for x in new_lines if x.startswith("<")] != [x for x in kept if x.startswith("<")]:
         raise LabelError("safety check failed: operations would change")
     if contour_refs(new_lines) != contour_refs(kept):
         raise LabelError("safety check failed: what an operation cuts would change")
@@ -569,7 +526,7 @@ def new_backup_dir(root: Path | None = None) -> Path:
 
 def plan(path: Path, remove: bool = False) -> Result:
     data = path.read_bytes()
-    return unlabel_bytes(data) if remove else label_bytes(data, path.name)
+    return unlabel_bytes(data) if remove else label_bytes(data)
 
 
 def save(path: Path, result: Result, backup_dir: Path) -> None:

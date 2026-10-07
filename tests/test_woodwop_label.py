@@ -9,6 +9,7 @@ import woodwop_label as wl
 SAMPLES = Path(__file__).resolve().parent.parent / "samples"
 PARTS = sorted(p for p in SAMPLES.iterdir() if "BOARD" not in p.name)
 BOARD = next(SAMPLES.glob("*BOARD*"))
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def lines_of(data: bytes) -> list[str]:
@@ -16,7 +17,7 @@ def lines_of(data: bytes) -> list[str]:
 
 
 def labeled(path: Path) -> wl.Result:
-    return wl.label_bytes(path.read_bytes(), path.name)
+    return wl.label_bytes(path.read_bytes())
 
 
 # ---------------------------------------------------------------- what gets written
@@ -25,15 +26,13 @@ def labeled(path: Path) -> wl.Result:
 @pytest.mark.parametrize("path", PARTS, ids=lambda p: p.name)
 def test_label_only_inserts_label_lines(path):
     old = path.read_bytes()
-    r = wl.label_bytes(old, path.name)
+    r = wl.label_bytes(old)
     assert r.status == wl.LABELED
-    km = f'KM="{r.info.label}"'
-    assert len(r.drawing) == 31
+    km = 'KM="SIZE 95 1/4 x 12"'
+    assert len(r.drawing) == 8  # 9 5 1 / 4 x 1 2
 
     # Build the expected file by hand: the original lines with the label put in.
     expected = lines_of(old)
-    first_op = next(i for i, x in enumerate(expected) if x.startswith("<102 "))
-    expected[first_op:first_op] = [wl.COMMENT_HEADER, km, ""]
     workpiece = expected.index("<100 \\WerkStck\\")
     drawn = []
     for k, poly in enumerate(r.drawing):
@@ -46,7 +45,7 @@ def test_label_only_inserts_label_lines(path):
     # and a plain diff sees nothing but added lines
     ops = difflib.SequenceMatcher(a=lines_of(old), b=lines_of(r.new_data), autojunk=False).get_opcodes()
     assert {op[0] for op in ops} == {"equal", "insert"}
-    assert sum(j2 - j1 for tag, _, _, j1, j2 in ops if tag == "insert") == 5 + len(drawn)
+    assert sum(j2 - j1 for tag, _, _, j1, j2 in ops if tag == "insert") == 2 + len(drawn)
 
 
 def test_contour_format_matches_woodwop():
@@ -72,9 +71,7 @@ def test_label_placement(path):
     assert not wl.is_label_contour(cs[0])
     assert all(wl.is_label_contour(c) for c in cs[1:])
     assert new[cs[-1].end] == "<100 \\WerkStck\\"
-    # comment sits between the workpiece block and the first operation
-    c = new.index(wl.COMMENT_HEADER)
-    assert new[c - 2] == 'AY="0"' and new[c - 1] == "" and new[c + 3].startswith("<102 ")
+    assert wl.COMMENT_HEADER not in new
 
 
 @pytest.mark.parametrize("path", PARTS, ids=lambda p: p.name)
@@ -84,7 +81,7 @@ def test_keeps_crlf_header_and_ending(path):
     added = len(lines_of(new)) - len(lines_of(old))
     assert new.count(b"\r\n") == old.count(b"\r\n") + added
     assert b"\n" not in new.replace(b"\r\n", b"")
-    assert new.endswith(old[old.index(b"<102 ") :])  # every operation byte-identical, in place
+    assert new.endswith(old[old.index(b"<100 ") :])  # workpiece and every operation byte-identical
     assert new.startswith(old[: old.index(b"[001")])  # header untouched
 
 
@@ -105,13 +102,13 @@ def test_drawing_sits_inside_the_part(path):
 def test_routing_still_cuts_only_the_part_outline(path):
     old, new = lines_of(path.read_bytes()), lines_of(labeled(path).new_data)
     assert wl.contour_refs(old) == wl.contour_refs(new) == [("<105 \\Konturfraesen\\", 1)] * 2  # EA + EE
-    assert sorted(x for x in new if x.startswith("<")) == sorted([x for x in old if x.startswith("<")] + [wl.COMMENT_HEADER])
+    assert [x for x in new if x.startswith("<")] == [x for x in old if x.startswith("<")]
 
 
 def test_verify_catches_a_router_on_the_label():
     path = PARTS[0]
     old = path.read_bytes()
-    r = wl.label_bytes(old, path.name)
+    r = wl.label_bytes(old)
     for bad in (
         r.new_data.replace(b'EA="1:0"', b'EA="2:0"'),  # existing routing moved onto the label
         r.new_data.replace(b"!\r\n", b'<105 \\Konturfraesen\\\r\nEA="5:0"\r\nEE="5:3"\r\n\r\n!\r\n'),  # router added
@@ -130,7 +127,7 @@ def test_remove_refuses_if_label_is_routed():
 def test_sheet_check_clean_board():
     check = wl.check_sheet(lines_of(BOARD.read_bytes()))
     assert check.dangers == [] and check.labeled_parts == 0
-    assert wl.label_bytes(BOARD.read_bytes(), BOARD.name).status == wl.SHEET
+    assert wl.label_bytes(BOARD.read_bytes()).status == wl.SHEET
 
 
 def fake_labeled_sheet() -> bytes:
@@ -138,17 +135,17 @@ def fake_labeled_sheet() -> bytes:
     data = BOARD.read_bytes()
     contour = "\r\n".join(wl.contour_lines(4, [(100.0, 100.0), (150.0, 100.0), (150.0, 140.0)])).encode()
     data = data.replace(b"<100 \\WerkStck\\", contour + b"\r\n<100 \\WerkStck\\", 1)
-    return data.replace(b'bfb_0="57"\r\n', b'bfb_0="57"\r\nLABEL_0="1"\r\nKM="SIZE 1 x 2 x 3 IN | JOB 1 | PART X"\r\n')
+    return data.replace(b'bfb_0="57"\r\n', b'bfb_0="57"\r\nLABEL_0="1"\r\nKM="SIZE 1 x 2"\r\n')
 
 
 def test_sheet_check_labeled_board_ok():
-    r = wl.label_bytes(fake_labeled_sheet(), BOARD.name)
+    r = wl.label_bytes(fake_labeled_sheet())
     assert r.status == wl.SHEET and r.message.startswith("sheet OK: 1 labeled part(s), 1 label lines")
 
 
 def test_sheet_check_flags_router_on_label():
     bad = fake_labeled_sheet().replace(b'EA="3:0"', b'EA="4:0"')
-    r = wl.label_bytes(bad, BOARD.name)
+    r = wl.label_bytes(bad)
     assert r.status == wl.PROBLEM and r.message.startswith("DANGER - DO NOT RUN")
     assert "label contour 4" in r.message
 
@@ -164,35 +161,36 @@ def test_sheet_check_flags_missing_contour():
 @pytest.mark.parametrize("path", PARTS, ids=lambda p: p.name)
 def test_remove_restores_exact_original(path):
     old = path.read_bytes()
-    r = wl.unlabel_bytes(wl.label_bytes(old, path.name).new_data)
+    r = wl.unlabel_bytes(wl.label_bytes(old).new_data)
     assert r.status == wl.REMOVED and r.new_data == old
 
 
 @pytest.mark.parametrize("path", PARTS, ids=lambda p: p.name)
 def test_labeling_twice_changes_nothing(path):
-    assert wl.label_bytes(labeled(path).new_data, path.name).status == wl.ALREADY
+    assert wl.label_bytes(labeled(path).new_data).status == wl.ALREADY
 
 
 def test_relabel_replaces_old_label():
     path = PARTS[0]
     old = path.read_bytes()
-    first = wl.label_bytes(old, "OTHER_9999999_X_FS_U1.mpr").new_data
-    r = wl.label_bytes(first, path.name)
+    bigger = old.replace(b"_BSX=2419.350000", b"_BSX=2438.400000").replace(b'l="2419.35"', b'l="2438.4"')
+    first = wl.label_bytes(bigger).new_data  # labeled as 96 x 12
+    back = first.replace(b"_BSX=2438.400000", b"_BSX=2419.350000").replace(b'l="2438.4"', b'l="2419.35"')
+    r = wl.label_bytes(back)  # size went back to 95 1/4: label must follow
     assert r.status == wl.LABELED and r.message == "label updated"
-    assert r.new_data == wl.label_bytes(old, path.name).new_data
+    assert r.new_data == wl.label_bytes(old).new_data
 
 
-def test_upgrades_first_test_version_label():
-    """Files labeled by the first test version (LABEL="0", no drawing) get the drawing added."""
+@pytest.mark.parametrize("fixture", ["v1_comment_label_CEP_U12.mpr", "v2_drawn_label_CEP_U12.mpr"])
+def test_upgrades_files_labeled_by_earlier_test_versions(fixture):
+    """The test files sent earlier (comment-only, and size+job+part drawing) upgrade cleanly."""
     path = PARTS[0]
     old = path.read_bytes()
-    km = b'KM="SIZE 95-1/4 x 12 x 3/4 IN | JOB 1071128 | PART CEP U12 X1"'
-    v1 = old.replace(b'KM="bore from back"\r\n', b'KM="bore from back"\r\nLABEL="0"\r\n' + km + b"\r\n", 1)
-    v1 = v1.replace(b'AY="0"\r\n\r\n', b'AY="0"\r\n\r\n<101 \\Kommentar\\\r\n' + km + b"\r\n\r\n", 1)
-    r = wl.label_bytes(v1, path.name)
+    earlier = (FIXTURES / fixture).read_bytes()
+    r = wl.label_bytes(earlier)
     assert r.status == wl.LABELED and r.message == "label updated"
-    assert r.new_data == wl.label_bytes(old, path.name).new_data
-    assert wl.unlabel_bytes(v1).new_data == old
+    assert r.new_data == wl.label_bytes(old).new_data
+    assert wl.unlabel_bytes(earlier).new_data == old
 
 
 def test_original_files_untouched_by_planning():
@@ -204,29 +202,36 @@ def test_original_files_untouched_by_planning():
 
 def test_size_and_label_text():
     r = labeled(PARTS[0])
-    assert (r.info.length_mm, r.info.width_mm, r.info.thickness_mm) == (2419.35, 304.8, 19.5)
-    assert r.info.label == "SIZE 95-1/4 x 12 x 3/4 IN | JOB 1071128 | PART CEP U12 X1"
+    assert (r.info.length_mm, r.info.width_mm) == (2419.35, 304.8)
+    assert r.info.label == "SIZE 95 1/4 x 12" and r.info.size_text == "95 1/4 x 12"
 
 
 def test_stale_header_is_refused():
     old = PARTS[0].read_bytes().replace(b"_BSX=2419.350000", b"_BSX=2400.000000")
-    r = wl.label_bytes(old, PARTS[0].name)
+    r = wl.label_bytes(old)
     assert r.status == wl.PROBLEM and "doesn't match" in r.message
 
 
 def test_foreign_label_variable_is_refused():
     old = PARTS[0].read_bytes().replace(b'bfb="57"\r\n', b'bfb="57"\r\nLABEL="0"\r\nKM="mine"\r\n')
-    assert wl.label_bytes(old, PARTS[0].name).status == wl.PROBLEM
+    assert wl.label_bytes(old).status == wl.PROBLEM
 
 
 def test_own_label_variable_with_other_value_is_refused():
     old = PARTS[0].read_bytes().replace(b'bfb="57"\r\n', b'bfb="57"\r\nlabel="5"\r\nKM="theirs"\r\n')
-    r = wl.label_bytes(old, PARTS[0].name)
+    r = wl.label_bytes(old)
     assert r.status == wl.PROBLEM and "LABEL" in r.message
 
 
 def test_not_a_woodwop_file():
-    assert wl.label_bytes(b"hello\r\n", "x.mpr").status == wl.PROBLEM
+    assert wl.label_bytes(b"hello\r\n").status == wl.PROBLEM
+
+
+def test_incomplete_file_is_refused():
+    """A file still being written (no ! end mark) is never labeled."""
+    old = PARTS[0].read_bytes()
+    r = wl.label_bytes(old[: len(old) // 2])
+    assert r.status == wl.PROBLEM and "incomplete" in r.message
 
 
 def test_file_without_variable_list_round_trips():
@@ -234,7 +239,7 @@ def test_file_without_variable_list_round_trips():
     start, end = old.index(b"[001"), old.index(b"]1")
     no_vars = old[:start] + old[end:]
     no_vars = no_vars.replace(b'LA="l"', b'LA="2419.35"').replace(b'BR="w"', b'BR="304.8"').replace(b'DI="t"', b'DI="19.5"')
-    r = wl.label_bytes(no_vars, PARTS[0].name)
+    r = wl.label_bytes(no_vars)
     assert r.status == wl.LABELED
     assert b"[001\r\nLABEL=" in r.new_data
     assert wl.unlabel_bytes(r.new_data).new_data == no_vars
@@ -259,15 +264,15 @@ def test_verify_catches_an_extra_line():
         wl.verify(PARTS[0].read_bytes(), r.new_data.replace(b"!\r\n", b'KM="x"\r\n!\r\n'), r.info.label, r.drawing)
 
 
-def test_label_survives_woodwop_resaving_comment_block():
-    """woodWOP may add fields to the comment block when it re-saves the file."""
+def test_old_comment_block_resaved_by_woodwop_is_still_removed():
+    """woodWOP may add fields to the first version's comment block when it re-saves the file."""
     path = PARTS[0]
-    r = labeled(path)
-    km = f'KM="{r.info.label}"'.encode()
-    resaved = r.new_data.replace(b"<101 \\Kommentar\\\r\n" + km + b"\r\n",
-                                 b"<101 \\Kommentar\\\r\n" + km + b'\r\nKAT="Kommentar"\r\nMNM="Comment"\r\n')
-    assert resaved != r.new_data
-    assert wl.label_bytes(resaved, path.name).status in (wl.LABELED, wl.ALREADY)
+    v1 = (FIXTURES / "v1_comment_label_CEP_U12.mpr").read_bytes()
+    km = b'KM="SIZE 95-1/4 x 12 x 3/4 IN | JOB 1071128 | PART CEP U12 X1"'
+    resaved = v1.replace(b"<101 \\Kommentar\\\r\n" + km + b"\r\n",
+                         b"<101 \\Kommentar\\\r\n" + km + b'\r\nKAT="Kommentar"\r\nMNM="Comment"\r\n')
+    assert resaved != v1
+    assert wl.label_bytes(resaved).new_data == labeled(path).new_data
     assert wl.unlabel_bytes(resaved).new_data == path.read_bytes()
 
 
@@ -276,26 +281,11 @@ def test_label_survives_woodwop_resaving_comment_block():
 
 @pytest.mark.parametrize(
     "mm, text",
-    [(2419.35, "95-1/4"), (304.8, "12"), (19.5, "3/4"), (19.05, "3/4"), (2438.4, "96"),
-     (3.175, "1/8"), (1.5875, "1/16"), (0.7, "0"), (609.6 - 0.5, "24"), (31.75, "1-1/4"), (365.125, "14-3/8")],
+    [(2419.35, "95 1/4"), (304.8, "12"), (19.5, "3/4"), (19.05, "3/4"), (2438.4, "96"),
+     (3.175, "1/8"), (1.5875, "1/16"), (0.7, "0"), (609.6 - 0.5, "24"), (31.75, "1 1/4"), (365.125, "14 3/8")],
 )
 def test_inches_text(mm, text):
     assert wl.inches_text(mm) == text
-
-
-@pytest.mark.parametrize(
-    "stem, job, part",
-    [
-        ("WHE_TABBY_1071128_ROSENBAUM_SHARI_L_CEP_U12_X1", "1071128", "CEP U12 X1"),
-        ("WHE_TABBY_1071128_ROSENBAUM_SHARI_L_REP_U13_X1", "1071128", "REP U13 X1"),
-        ("WHEAT_TAB_1071128_BOARD_2", "1071128", "BOARD 2"),
-        ("WHITE_1234567_SMITH_J_FS_U3", "1234567", "FS U3"),
-        ("no_job_here", None, "no job here"),
-        ('ODD"NAME_12345_A_B', "12345", "A B"),
-    ],
-)
-def test_parse_file_name(stem, job, part):
-    assert wl.parse_file_name(stem) == (job, part)
 
 
 def test_every_glyph_is_one_open_line():
@@ -305,22 +295,34 @@ def test_every_glyph_is_one_open_line():
 
 
 def test_layout_fits_and_rotates():
-    wide = sf.layout(2419.35, 304.8, "95-1/4 x 12 x 3/4", "JOB 1071128 CEP U12 X1")
-    xs = [x for p in wide for x, _ in p]
-    assert max(xs) - min(xs) < 2419.35 * 0.85
-    tall = sf.layout(304.8, 2419.35, "12 x 95-1/4 x 3/4", "JOB 1071128 CEP U12 X1")
-    ys = [y for p in tall for _, y in p]
-    assert max(ys) - min(ys) > max(x for p in tall for x, _ in p) - min(x for p in tall for x, _ in p)  # runs along Y
-    assert sf.layout(60, 40, "2-3/8 x 1-9/16 x 3/4", "JOB 1 X") == []  # too small: hidden label only
+    wide = sf.layout(2419.35, 304.8, "95 1/4 x 12")
+    xs, ys = [x for p in wide for x, _ in p], [y for p in wide for _, y in p]
+    assert max(xs) - min(xs) < 2419.35 * 0.85 and max(ys) - min(ys) == pytest.approx(50, abs=0.01)
+    tall = sf.layout(304.8, 2419.35, "12 x 95 1/4")
+    xs, ys = [x for p in tall for x, _ in p], [y for p in tall for _, y in p]
+    assert max(ys) - min(ys) > max(xs) - min(xs)  # runs along Y
 
 
-def test_small_part_gets_hidden_label_only():
+@pytest.mark.parametrize("length, width", [(2419.35, 304.8), (762, 304.8), (600, 50), (300, 76.2), (100, 60), (60, 40)])
+def test_text_gets_smaller_on_smaller_parts_and_stays_inside(length, width):
+    info = wl.PartInfo(length, width)
+    d = info.drawing
+    assert d, "should fit"
+    ys = [y for p in d for _, y in p]
+    height = max(ys) - min(ys)
+    assert 3.0 <= height <= min(50.0, width * 0.3) + 0.01
+    for poly in d:
+        assert all(0 < x < length and 0 < y < width for x, y in poly)
+
+
+def test_tiny_part_gets_size_in_variables_only():
+    assert sf.layout(20, 8, "13/16 x 5/16") == []
     old = PARTS[0].read_bytes()
-    small = (old.replace(b"_BSX=2419.350000", b"_BSX=60.000000").replace(b"_BSY=304.800000", b"_BSY=40.000000")
-             .replace(b'l="2419.35"', b'l="60"').replace(b'w="304.8"', b'w="40"'))
-    r = wl.label_bytes(small, PARTS[0].name)
+    small = (old.replace(b"_BSX=2419.350000", b"_BSX=20.000000").replace(b"_BSY=304.800000", b"_BSY=8.000000")
+             .replace(b'l="2419.35"', b'l="20"').replace(b'w="304.8"', b'w="8"'))
+    r = wl.label_bytes(small)
     assert r.status == wl.LABELED and r.drawing == [] and "too small" in r.message
-    assert b'LABEL="0"' in r.new_data and wl.unlabel_bytes(r.new_data).new_data == small
+    assert b'LABEL="0"\r\nKM="SIZE 13/16 x 5/16"' in r.new_data and wl.unlabel_bytes(r.new_data).new_data == small
 
 
 # ---------------------------------------------------------------- saving

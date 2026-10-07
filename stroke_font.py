@@ -12,7 +12,7 @@ Point = tuple[float, float]
 
 CAP = 6.0  # glyph height in grid units
 ADVANCE = 5.5  # glyph width (4) plus spacing
-SPACE = 4.0
+SPACE = 3.0
 
 GLYPHS: dict[str, list[Point]] = {
     "0": [(1, 0), (0, 1), (0, 5), (1, 6), (3, 6), (4, 5), (4, 1), (3, 0), (1.8, 0)],
@@ -82,40 +82,22 @@ def text_polylines(text: str) -> list[list[Point]]:
     return out
 
 
-def layout(length: float, width: float, line1: str, line2: str = "") -> list[list[Point]]:
-    """Polylines (mm, part coordinates) for a label centered on a length x width part.
+def layout(length: float, width: float, text: str) -> list[list[Point]]:
+    """Polylines (mm, part coordinates) for ``text`` centered on a length x width part.
 
-    Text runs along the longer side. Line 1 (the size) is the big line; line 2
-    goes under it, smaller, when there's room. Returns [] if the part is too
-    small to draw on legibly.
+    Text runs along the longer side. It is as big as fits, up to 50 mm tall and
+    30% of the part's short side, so smaller parts get smaller text. Returns []
+    if the part is too small for text at least 3 mm tall.
     """
     rotate = width > length
     long_side, short_side = (width, length) if rotate else (length, width)
-    max_w, max_h = long_side * 0.85, short_side * 0.8
-
-    w1 = text_width(line1)
-    h1 = min(50.0, short_side * 0.2, max_w * CAP / w1)
-    if h1 < 5.0:
+    h = min(50.0, short_side * 0.3, long_side * 0.85 * CAP / text_width(text))
+    if h < 3.0:
         return []
 
-    lines = [(line1, h1)]
-    if line2:
-        w2 = text_width(line2)
-        h2 = min(h1 * 0.6, max_w * CAP / w2)
-        if h2 >= 5.0 and h1 + 0.5 * h1 + h2 <= max_h:
-            lines.append((line2, h2))
-
-    gap = 0.5 * h1
-    total_h = sum(h for _, h in lines) + gap * (len(lines) - 1)
-    out: list[list[Point]] = []
-    top = total_h / 2  # text block centered on the part, line 1 on top
-    for text, h in lines:
-        scale = h / CAP
-        x0 = -text_width(text) * scale / 2
-        y0 = top - h
-        for poly in text_polylines(text):
-            out.append([(x0 + gx * scale, y0 + gy * scale) for gx, gy in poly])
-        top = y0 - gap
+    scale = h / CAP
+    x0, y0 = -text_width(text) * scale / 2, -h / 2
+    out = [[(x0 + gx * scale, y0 + gy * scale) for gx, gy in poly] for poly in text_polylines(text)]
 
     cx, cy = length / 2, width / 2
     if rotate:  # read bottom to top along the part's Y
