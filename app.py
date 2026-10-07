@@ -21,7 +21,6 @@ TITLE = "Wood WOP Labeling"
 STATUS_TEXT = {
     wl.LABELED: "Ready to label",
     wl.ALREADY: "Already labeled",
-    wl.SHEET: "Sheet file - skipped",
     wl.NO_LABEL: "No label",
 }
 
@@ -34,8 +33,8 @@ class App:
         self.backup_root = wl.default_backup_root()
 
         root.title(TITLE)
-        root.geometry("1100x600")
-        root.minsize(800, 400)
+        root.geometry("1100x700")
+        root.minsize(800, 520)
 
         top = ttk.Frame(root, padding=(10, 10, 10, 4))
         top.pack(fill="x")
@@ -66,6 +65,10 @@ class App:
         self.table.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
         self.table.bind("<<TreeviewSelect>>", self.show_selected)
+
+        self.preview = tk.Canvas(root, height=170, background="#c8d4f0", highlightthickness=0)
+        self.preview.pack(fill="x", padx=10, pady=(6, 0))
+        self.preview.bind("<Configure>", lambda _e: self.show_selected())
 
         info = ttk.Frame(root, padding=(10, 6, 10, 0))
         info.pack(fill="x")
@@ -131,10 +134,13 @@ class App:
             if f in done:
                 status, tag = done[f], ("problem" if done[f].startswith("Problem") else "ok")
             elif r.status == wl.PROBLEM:
-                status, tag = f"Problem: {r.message}", "problem"
+                text = r.message if r.message.startswith("DANGER") else f"Problem: {r.message}"
+                status, tag = text, "problem"
             else:
                 status = STATUS_TEXT.get(r.status, r.message)
-                tag = "skip" if r.status in (wl.SHEET, wl.ALREADY, wl.NO_LABEL) else ""
+                tag = "skip" if r.status in (wl.ALREADY, wl.NO_LABEL) else ""
+                if r.status == wl.SHEET:
+                    tag = "ok" if r.message.startswith("sheet OK") else "skip"
             self.table.insert(
                 "",
                 "end",
@@ -149,7 +155,7 @@ class App:
         if self.files and not done:
             parts = [f"{len(self.files)} files"]
             for key, word in ((wl.LABELED, "to label"), (wl.ALREADY, "already labeled"),
-                              (wl.SHEET, "sheet file(s) skipped"), (wl.PROBLEM, "problem(s)")):
+                              (wl.SHEET, "sheet file(s) checked"), (wl.PROBLEM, "problem(s)")):
                 if counts.get(key):
                     parts.append(f"{counts[key]} {word}")
             self.summary.config(text=", ".join(parts))
@@ -160,6 +166,26 @@ class App:
         sel = self.table.selection()
         r = self.results.get(Path(sel[0])) if sel else None
         self.label_text.set(r.info.label if r and r.info else (r.message if r else ""))
+        self.draw_preview(r)
+
+    def draw_preview(self, r: wl.Result | None):
+        """The part outline with the label drawn on it, as it will look in woodWOP."""
+        c = self.preview
+        c.delete("all")
+        if not r or not r.info:
+            c.create_text(12, 12, anchor="nw", fill="#555555",
+                          text="Click a part file above to see the label drawn on it.")
+            return
+        cw, ch = max(c.winfo_width(), 200), int(c["height"])
+        length, width = r.info.length_mm, r.info.width_mm
+        k = min((cw - 24) / length, (ch - 24) / width)
+        ox, oy = (cw - length * k) / 2, (ch - width * k) / 2
+        c.create_rectangle(ox, oy, ox + length * k, oy + width * k, outline="#d32f2f", width=2)
+        for poly in r.drawing:
+            c.create_line(*[v for x, y in poly for v in (ox + x * k, oy + (width - y) * k)], fill="black")
+        if not r.drawing:
+            c.create_text(cw / 2, ch / 2, fill="#555555",
+                          text="Part too small to draw on - the label is still added as hidden text.")
 
     def update_buttons(self):
         has_files = bool(self.files)

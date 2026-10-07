@@ -1,17 +1,21 @@
 """Add a part-size label to woodWOP .mpr part programs without touching any machining.
 
-The label is plain text, written in two places that the machine never runs:
+The label goes in three places, none of which the machine ever runs:
 
-1. A ``LABEL`` entry in the part's variable list (``[001``) with the label as its
-   comment (``KM="..."``). Nothing in the program refers to ``LABEL``. woodNest
-   copies every part's variables and their comments onto the sheet, so the label
-   rides along with the part.
-2. A woodWOP comment component (``<101 \\Kommentar\\``) right after the
-   workpiece block, which shows up in woodWOP's list of operations.
+1. **Drawn on the part** as contour lines spelling the size (and job / part
+   under it). A woodWOP contour is only geometry; the machine cuts a contour
+   only when a routing operation points at it, and nothing ever points at
+   these. Each character is one open line, so it can never look like a cutout.
+2. A ``LABEL`` entry in the part's variable list (``[001``) with the label text
+   as its comment. Its value is the number of drawn label contours, which is
+   how the drawing is found again for updating or removing it.
+3. A woodWOP comment (``<101 \\Kommentar\\``) right after the workpiece block,
+   shown in woodWOP's list of operations.
 
-Every other byte of the file stays exactly as it was. After building the new
-file we strip the label back out and require the result to match the original
-byte for byte; if it does not, nothing is written.
+Every other byte of the file stays exactly as it was. Before anything is
+saved, the new file is checked line by line against the original: only label
+lines may be added, no operation may be added or changed, and no operation may
+point at a label contour. If any check fails, nothing is written.
 """
 
 from __future__ import annotations
@@ -21,9 +25,11 @@ import math
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+import stroke_font
 
 # latin-1 maps every byte to one character and back, so decoding and
 # re-encoding never alters a single byte of the original file.
@@ -31,19 +37,25 @@ ENCODING = "latin-1"
 MM_PER_INCH = 25.4
 FRACTION_DENOMINATOR = 16  # round inch sizes to the nearest 1/16"
 
-LABEL_VAR_LINE = 'LABEL="0"'
+LABEL_VAR_RE = re.compile(r'^LABEL="(\d+)"$')  # value = number of drawn label contours
 COMMENT_HEADER = "<101 \\Kommentar\\"
 LABEL_KM_RE = re.compile(r'^KM="SIZE [^"]* \| JOB [^"]*"$')
 SECTION_START = ("[", "]", "<", "$", "!")
 MPR_SUFFIXES = (".mpr",)
+
+CONTOUR_RE = re.compile(r"^\](\d+)$")
+LABEL_COORD_RE = re.compile(r"^-?\d+\.\d{4}$")  # drawn label points: absolute mm, exactly 4 decimals
+CONTOUR_REF_RE = re.compile(r'^([A-Za-z_]+)="(\d+):(\d+)"$')  # e.g. EA="1:0" = contour 1, element 0
 
 # Result statuses
 LABELED = "labeled"  # label added or updated
 ALREADY = "already"  # file already carries the correct label
 REMOVED = "removed"  # label taken out
 NO_LABEL = "no-label"  # nothing to remove
-SHEET = "sheet"  # nested sheet (board) file, left alone
-PROBLEM = "problem"  # could not be labeled safely, left alone
+SHEET = "sheet"  # nested sheet (board) file, checked, left alone
+PROBLEM = "problem"  # could not be labeled safely (or a sheet failed its check), left alone
+
+Point = tuple[float, float]
 
 
 class LabelError(Exception):
@@ -66,6 +78,12 @@ class PartInfo:
     def label(self) -> str:
         return f"SIZE {self.size_text} IN | JOB {self.job or 'UNKNOWN'} | PART {self.part}"
 
+    @property
+    def drawing(self) -> list[list[Point]]:
+        """The label as polylines on the part (mm), one per character. [] if the part is too small."""
+        second = f"JOB {self.job} {self.part}" if self.job else self.part
+        return stroke_font.layout(self.length_mm, self.width_mm, self.size_text, second)
+
 
 @dataclass
 class Result:
@@ -74,6 +92,7 @@ class Result:
     info: PartInfo | None = None
     new_data: bytes | None = None  # set only when the file should be rewritten
     old_data: bytes | None = None  # the bytes new_data was built from
+    drawing: list[list[Point]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- formatting
@@ -193,26 +212,163 @@ def read_size(lines: list[str]) -> tuple[float, float, float]:
     return size[0], size[1], size[2]
 
 
+# ---------------------------------------------------------------- contours and routing
+
+
+@dataclass
+class Contour:
+    number: int
+    start: int  # index of the "]n" line
+    end: int  # index just past the contour's last line
+    elements: list[tuple[str, dict[str, str]]]  # (type e.g. "KP"/"KL"/"KA", values)
+
+
+def contours(lines: list[str]) -> list[Contour]:
+    """Every contour block (``]n`` ... up to the next contour or operation)."""
+    out = []
+    i = 0
+    while i < len(lines):
+        m = CONTOUR_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(lines) and not CONTOUR_RE.match(lines[j]) and not lines[j].startswith(("<", "!", "[")):
+            j += 1
+        elements: list[tuple[str, dict[str, str]]] = []
+        expect_type = False
+        for line in lines[i + 1 : j]:
+            if re.fullmatch(r"\$E\d+", line):
+                elements.append(("", {}))
+                expect_type = True
+            elif elements and expect_type and line.strip():
+                elements[-1] = (line.strip(), elements[-1][1])
+                expect_type = False
+            elif elements and "=" in line:
+                key, value = line.split("=", 1)
+                elements[-1][1].setdefault(key, value)
+        out.append(Contour(int(m.group(1)), i, j, elements))
+        i = j
+    return out
+
+
+def is_label_contour(c: Contour) -> bool:
+    """Looks exactly like a drawn label character: a start point plus straight
+    lines, all at absolute 4-decimal coordinates, not closed."""
+    if len(c.elements) < 2 or c.elements[0][0] != "KP" or any(t != "KL" for t, _ in c.elements[1:]):
+        return False
+    pts = []
+    for _, values in c.elements:
+        x, y = values.get("X", ""), values.get("Y", "")
+        if not (LABEL_COORD_RE.match(x) and LABEL_COORD_RE.match(y)):
+            return False
+        pts.append((x, y))
+    return pts[0] != pts[-1]
+
+
+def contour_refs(lines: list[str]) -> list[tuple[str, int]]:
+    """(operation, contour number) for every operation value that points at a
+    contour, like a routing operation's ``EA="1:0"``."""
+    refs = []
+    op = None
+    for line in lines:
+        if line.startswith("<"):
+            op = line
+        elif line == "" or line.startswith(("]", "$", "[", "!")):
+            op = None
+        elif op:
+            m = CONTOUR_REF_RE.match(line)
+            if m:
+                refs.append((op, int(m.group(2))))
+    return refs
+
+
+def contour_lines(number: int, poly: list[Point]) -> list[str]:
+    """One drawn label character as a woodWOP contour: a start point, then lines."""
+    x0, y0 = poly[0]
+    out = [f"]{number}", "$E0", "KP ", f"X={x0:.4f}", f"Y={y0:.4f}", "Z=0.0", "KO=00",
+           f".X={x0:.6f}", f".Y={y0:.6f}", ".Z=0.000000", ".KO=00", ""]
+    for k, ((xa, ya), (xb, yb)) in enumerate(zip(poly, poly[1:]), 1):
+        if (xa, ya) == (xb, yb):
+            raise LabelError("label drawing has a zero-length line")
+        angle = math.atan2(yb - ya, xb - xa) % (2 * math.pi)
+        out += [f"$E{k}", "KL ", f"X={xb:.4f}", f"Y={yb:.4f}",
+                f".X={xb:.6f}", f".Y={yb:.6f}", ".Z=0.000000", f".WI={angle:.6f}", ".WZ=0.000000", ""]
+    return out
+
+
+@dataclass
+class SheetCheck:
+    labeled_parts: int
+    label_contours: int
+    dangers: list[str]
+
+    @property
+    def message(self) -> str:
+        if self.dangers:
+            return "DANGER - DO NOT RUN: " + "; ".join(self.dangers)
+        if not self.labeled_parts:
+            return "sheet file, no labeled parts"
+        return (f"sheet OK: {self.labeled_parts} labeled part(s), {self.label_contours} label lines, "
+                f"no router on any label")
+
+
+def check_sheet(lines: list[str]) -> SheetCheck:
+    """Make sure no operation on a nested sheet points at a drawn label."""
+    cs = contours(lines)
+    numbers = {c.number for c in cs}
+    labels = {c.number for c in cs if is_label_contour(c)}
+    dangers = []
+    for op, n in contour_refs(lines):
+        if n in labels:
+            dangers.append(f"{op.strip()} is set to cut label contour {n}")
+        elif n not in numbers:
+            dangers.append(f"{op.strip()} points at contour {n}, which is missing")
+    labeled = sum(1 for x in lines if re.match(r'^LABEL(_\d+)?="\d+"$', x))
+    return SheetCheck(labeled, len(labels), dangers)
+
+
 # ---------------------------------------------------------------- label in / out
 
 
 def strip_label(lines: list[str]) -> list[str]:
     """The file's lines with any label this tool added taken out."""
+    var_at = None
+    drawn = 0
+    for i, line in enumerate(lines):
+        m = LABEL_VAR_RE.match(line)
+        if m:
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            if not LABEL_KM_RE.match(nxt):
+                raise LabelError("file already has its own LABEL variable")
+            if var_at is not None:
+                raise LabelError("file has more than one LABEL entry")
+            var_at, drawn = i, int(m.group(1))
+
+    remove: set[int] = set()
+    if var_at is not None:
+        remove |= {var_at, var_at + 1}
+        # a [001 block that holds nothing but our label goes too
+        if var_at >= 1 and lines[var_at - 1] == "[001" and block_end(lines, var_at - 1) == var_at + 2:
+            remove.add(var_at - 1)
+            if var_at + 2 < len(lines) and lines[var_at + 2] == "":
+                remove.add(var_at + 2)
+    if drawn:
+        cs = contours(lines)
+        ours = cs[-drawn:] if len(cs) >= drawn else []
+        if len(ours) != drawn or not all(is_label_contour(c) for c in ours):
+            raise LabelError("the drawn label doesn't look like one this tool made; left alone")
+        routed = {n for _, n in contour_refs(lines)}
+        if any(c.number in routed for c in ours):
+            raise LabelError("DANGER: an operation is set to cut the drawn label; left alone")
+        for c in ours:
+            remove |= set(range(c.start, c.end))
+    lines = [x for i, x in enumerate(lines) if i not in remove]
+
     out = []
     i = 0
     while i < len(lines):
         line = lines[i]
-        nxt = lines[i + 1] if i + 1 < len(lines) else ""
-        if line == "[001" and nxt == LABEL_VAR_LINE and block_end(lines, i) == i + 3:
-            km = lines[i + 2]
-            if LABEL_KM_RE.match(km):
-                i += 4 if i + 3 < len(lines) and lines[i + 3] == "" else 3
-                continue
-        if line == LABEL_VAR_LINE:
-            if not LABEL_KM_RE.match(nxt):
-                raise LabelError("file already has its own LABEL variable")
-            i += 2
-            continue
         if line == COMMENT_HEADER:
             end = block_end(lines, i)
             kms = [x for x in lines[i + 1 : end] if x.startswith("KM=")]
@@ -224,12 +380,36 @@ def strip_label(lines: list[str]) -> list[str]:
     return out
 
 
-def insert_label(lines: list[str], label: str) -> list[str]:
+def label_lines(label: str, drawing: list[list[Point]], first_contour: int) -> list[str]:
+    """Every line the label adds, for checking what was inserted."""
+    km = f'KM="{label}"'
+    out = [f'LABEL="{len(drawing)}"', km, COMMENT_HEADER, km, ""]
+    for k, poly in enumerate(drawing):
+        out += contour_lines(first_contour + k, poly)
+    return out
+
+
+def insert_label(lines: list[str], label: str, drawing: list[list[Point]]) -> list[str]:
     km = f'KM="{label}"'
     out = list(lines)
 
-    # Comment component right after the workpiece block (inserted first so the
-    # variable-block index found below is unaffected either way).
+    # Drawn label: new contours numbered after the existing ones, placed right
+    # after the last contour (before the first operation).
+    if drawing:
+        cs = contours(out)
+        first = max((c.number for c in cs), default=0) + 1
+        if cs:
+            at = cs[-1].end
+        else:
+            at = next((i for i, x in enumerate(out) if x.startswith("<") or x == "!"), None)
+            if at is None:
+                raise LabelError("no place found for the drawn label")
+        block = []
+        for k, poly in enumerate(drawing):
+            block += contour_lines(first + k, poly)
+        out[at:at] = block
+
+    # Comment component right after the workpiece block.
     w = find_line(out, "<100 \\WerkStck\\")
     if w is not None:
         e = block_end(out, w)
@@ -241,10 +421,11 @@ def insert_label(lines: list[str], label: str) -> list[str]:
     out[at:at] = [COMMENT_HEADER, km, ""]
 
     # LABEL variable at the end of the variable list.
+    var = [f'LABEL="{len(drawing)}"', km]
     v = find_line(out, "[001")
     if v is not None:
         e = block_end(out, v)
-        out[e:e] = [LABEL_VAR_LINE, km]
+        out[e:e] = var
     else:
         h = find_line(out, "[H")
         if h is None:
@@ -252,7 +433,7 @@ def insert_label(lines: list[str], label: str) -> list[str]:
         e = block_end(out, h)
         while e < len(out) and out[e] == "":
             e += 1
-        out[e:e] = ["[001", LABEL_VAR_LINE, km, ""]
+        out[e:e] = ["[001", *var, ""]
     return out
 
 
@@ -263,22 +444,26 @@ def label_bytes(data: bytes, file_name: str) -> Result:
         if find_line(lines, "[H") is None:
             raise LabelError("not a woodWOP file (no [H header)")
         if is_sheet(lines):
-            return Result(SHEET, "sheet file, left alone")
+            check = check_sheet(lines)
+            return Result(PROBLEM if check.dangers else SHEET, check.message)
         length, width, thick = read_size(lines)
         job, part = parse_file_name(Path(file_name).stem)
         info = PartInfo(length, width, thick, job, part)
+        drawing = info.drawing
 
         base = strip_label(lines)
         if any(re.match(r"label\s*=", x, re.IGNORECASE) for x in base):
             raise LabelError("file already has its own LABEL variable")
-        new_lines = insert_label(base, info.label)
+        new_lines = insert_label(base, info.label, drawing)
         if new_lines == lines:
-            return Result(ALREADY, "already labeled", info)
+            return Result(ALREADY, "already labeled", info, drawing=drawing)
 
         new_data = join_lines(new_lines, nl)
-        verify(data, new_data, info.label)
+        verify(data, new_data, info.label, drawing)
         status = "label added" if base == lines else "label updated"
-        return Result(LABELED, status, info, new_data, data)
+        if not drawing:
+            status += " (part too small to draw on)"
+        return Result(LABELED, status, info, new_data, data, drawing)
     except LabelError as e:
         return Result(PROBLEM, str(e))
 
@@ -306,20 +491,23 @@ def extra_lines(sub: list[str], full: list[str]) -> list[str] | None:
 
 
 def is_label_line(line: str) -> bool:
-    """Lines this tool writes, plus fields woodWOP may add to its comment block on re-save."""
+    """Lines an old label of ours can contain (including fields woodWOP may add to
+    its comment block on re-save, and drawn-contour lines)."""
     return (
-        line in (LABEL_VAR_LINE, COMMENT_HEADER, "", "[001")
-        or bool(LABEL_KM_RE.match(line))
+        line in (COMMENT_HEADER, "", "[001", "KP ", "KL ", "Z=0.0", "KO=00", ".KO=00")
+        or bool(LABEL_VAR_RE.match(line) or LABEL_KM_RE.match(line))
         or bool(re.fullmatch(r'[A-Z_]+="[^"]*"', line) and not line.startswith("KM="))
+        or bool(re.fullmatch(r"\]\d+|\$E\d+|\.?[A-Z]+=-?\d+\.\d+", line))
     )
 
 
-def verify(old: bytes, new: bytes, label: str) -> None:
+def verify(old: bytes, new: bytes, label: str, drawing: list[list[Point]]) -> None:
     """The new file must be the old file plus exactly one label, nothing else.
 
     Checked directly against the original lines, independent of strip_label:
     every original line must still be there in order (except an old label of
-    ours), and the only added lines must be the label lines.
+    ours), the only added lines must be the label lines, and no operation may
+    be added, changed, or pointed at a label contour.
     """
     old_lines, _ = split_lines(old)
     new_lines, _ = split_lines(new)
@@ -329,13 +517,26 @@ def verify(old: bytes, new: bytes, label: str) -> None:
     if removed is None or not all(is_label_line(x) for x in removed):
         raise LabelError("safety check failed: something other than an old label would be removed")
 
-    km = f'KM="{label}"'
-    expected = sorted([LABEL_VAR_LINE, km, COMMENT_HEADER, km, ""])
+    first = max((c.number for c in contours(kept)), default=0) + 1
+    expected = label_lines(label, drawing, first)
     if find_line(kept, "[001") is None:
-        expected = sorted(expected + ["[001", ""])
+        expected += ["[001", ""]
     added = extra_lines(kept, new_lines)
-    if added is None or sorted(added) != expected:
+    if added is None or sorted(added) != sorted(expected):
         raise LabelError("safety check failed: something other than the label would change")
+
+    # Router safety: the operations and what they cut must be exactly as before.
+    ops_now = sorted(x for x in new_lines if x.startswith("<"))
+    if ops_now != sorted([x for x in kept if x.startswith("<")] + [COMMENT_HEADER]):
+        raise LabelError("safety check failed: operations would change")
+    if contour_refs(new_lines) != contour_refs(kept):
+        raise LabelError("safety check failed: what an operation cuts would change")
+    drawn_numbers = set(range(first, first + len(drawing)))
+    if any(n in drawn_numbers for _, n in contour_refs(new_lines)):
+        raise LabelError("safety check failed: an operation would cut the drawn label")
+    new_contours = contours(new_lines)
+    if sorted(c.number for c in new_contours if is_label_contour(c) and c.number >= first) != sorted(drawn_numbers):
+        raise LabelError("safety check failed: drawn label contours not as expected")
 
     if read_size(new_lines) != read_size(old_lines):
         raise LabelError("safety check failed: part size would change")
