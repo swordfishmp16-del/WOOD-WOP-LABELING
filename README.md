@@ -1,53 +1,68 @@
 # Wood WOP Labeling
 
-Draws each part's size (length x width, in inches) and its unit number on
-woodWOP part files (`.mpr`), so they show on the part and travels with it into woodNest and
-onto the sheet. **No machining changes**, and the label is **never routed**.
+Draws each piece's size (depth x width, in inches) and its unit number on
+woodWOP part files (`.mpr`), so they show on the part and travel with it into
+woodNest and onto the sheet. Special shapes (L shelves, angled shelves) get
+every side numbered. **No machining changes**, and a label is **never routed**.
 
 ![Wood WOP Labeling window](docs/app.png)
 
-## What the label is
+## What gets labeled
 
-For `WHE_TABBY_1071128_ROSENBAUM_SHARI_L_CEP_U12_X1.mpr` (2419.35 x 304.8 mm):
+The app reads the outlines the router cuts, so it labels the **finished
+pieces**, not just the board:
 
-```
-95 1/4 x 12
-    U12
-```
+| Part | Label |
+|---|---|
+| Regular rectangle (end panel, shelf) | `12 x 95 1/4` with `U12` under it, centered |
+| Double shelf (two shelves from one board) | each shelf gets its own size, e.g. `13 x 35` on each |
+| L shelf, angled shelf, any other shape | every straight side numbered with its length, just inside that side, plus the overall size and unit in the middle |
+| Curved side | no number (not needed); labels stay clear of the curve |
+| Cutout or edge notch in a piece | not a piece; labels stay clear of it |
+| Closed pocket or shallow routed outline | not a piece; labels stay clear of it |
 
-- **Size**: length x width, rounded to the nearest 1/16". Read from the part's
-  rough exterior size in the file.
-- **Unit**: the last `U` + number in the file name after the job number
-  (`..._CEP_U12_X1` -> `U12`). Drawn smaller (60%), centered under the size. If
-  the file name has no unit, only the size is drawn.
-- Drawn centered on the part, along its longer side. The size is up to 50 mm
-  (about 2") tall and shrinks on smaller parts, down to 3 mm. The unit is left
-  off if it would be under 3 mm. A part too small for the size gets the label in
-  its variable list only, with no drawing.
+- **Sizes** are depth x width: the piece's front-to-back size (Y in woodWOP)
+  first, then side to side (X). Rounded to the nearest 1/16".
+- **Unit** comes from the file name: the last `U12`, `UNIT12` or `UNIT_12`
+  after the job number, shown as `U12`. If there's none, only the size is shown.
+- **Text size** shrinks with the piece, from 50 mm (about 2") on big pieces down
+  to 3 mm. If there is no room to draw something, the app says so; the sizes are
+  still written to the variable list.
+- If the routing can't be followed for sure (a router cutting along an open
+  line or only part of an outline, a depth or outline that can't be worked out,
+  several curved pieces), the app labels the **board size** instead of guessing.
+  The status in the app says why, and the hidden label is marked
+  `(BOARD - PIECES UNCLEAR)`. A single piece with curves gets the board's
+  overall size.
+- A part where an operation points at a contour that isn't in the file is
+  reported as a problem and left alone.
 
-It's written in two places, neither of which the machine runs:
+The label is written in two places, neither of which the machine runs:
 
-1. **Drawn on the part as plain lines.** Each character is a woodWOP
+1. **Drawn on the pieces as plain lines.** Each character is a woodWOP
    **contour**, which is just geometry. The machine only cuts a contour when a
-   routing operation points at it, and **nothing ever points at these**. Each
-   character is one open line that never closes, so woodNest can't mistake a
-   letter for a cutout.
+   routing operation points at it, and **nothing ever points at these**. The
+   label contours are numbered above every contour any operation points at.
+   Each character is one open line that never closes, so woodNest can't mistake
+   a letter for a cutout.
 2. **A `LABEL` entry at the end of the part's variable list**, with the label as
-   its comment (`KM="SIZE 95 1/4 x 12 | U12"`). Its value is the number of drawn
-   characters. That's how the app finds the drawing again to update or remove
-   it, and your checking AI can read the size here.
+   its comment, for example `KM="SIZE 12 x 95 1/4 | U12"` or
+   `KM="SIZE 31 7/8 x 25 7/8 (SIDES 31 7/8, 16, 15 7/8, 9 7/8, 16, 25 7/8) | U7"`.
+   Its value is the number of drawn characters. That's how the app finds the
+   drawing again to update or remove it, and your checking AI can read every
+   size here.
 
-In the file:
+In the file (end panel):
 
 ```
 bfb="57"
 KM="bore from back"
 LABEL="11"                   <- added (11 drawn characters)
-KM="SIZE 95 1/4 x 12 | U12"  <- added
+KM="SIZE 12 x 95 1/4 | U12"  <- added
 
 ]1                           <- the part's own outline (unchanged)
 ...
-]2                           <- added: drawn "9"
+]2                           <- added: drawn "1"
 $E0
 KP
 X=...
@@ -106,7 +121,7 @@ tick **Auto-label new files in this folder**. While the window stays open:
 - Before a file is replaced, the original is copied to
   `Documents\WoodWOP Label Backups\<date and time>\`.
 - A file that already has the right label is left alone. Running it twice is safe.
-- If a part's size or file name (unit) changes, its label is updated.
+- If a part's size, shape or file name (unit) changes, its label is updated.
 - If the size in the file header doesn't match the part's own size settings,
   the file is skipped and marked as a problem. A stale header could otherwise
   give a wrong label.
@@ -119,7 +134,8 @@ tick **Auto-label new files in this folder**. While the window stays open:
 
 - `woodwop_label.py`: labeling logic, plus a command line
   (`python woodwop_label.py --dry-run <folder>`).
-- `stroke_font.py`: the single-line font and label layout.
+- `stroke_font.py`: the single-line font and rectangle label layout.
+- `shapes.py`: works out the pieces from the routed outlines and lays out side labels.
 - `app.py`: the window app.
 - `tests/`: run `python -m pytest`. Tests use the real files in `samples/`, and
   files from the earlier test versions in `tests/fixtures/`.

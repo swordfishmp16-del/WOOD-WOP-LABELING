@@ -1,8 +1,10 @@
 """Add a part-size label to woodWOP .mpr part programs without touching any machining.
 
-The label is the part's length x width in inches (e.g. ``95 1/4 x 12``) with the
-unit the part is for (e.g. ``U12``, from the file name) under it. It is written
-in two places, neither of which the machine ever runs:
+The label is each piece's size in inches, depth x width (e.g. ``12 x 95 1/4``),
+with the unit the part is for (e.g. ``U12``, from the file name) under it.
+Special shapes (L shelves, angled shelves) also get every straight side
+numbered; a double shelf gets each shelf's own size (see shapes.py). The label
+is written in two places, neither of which the machine ever runs:
 
 1. **Drawn on the part** as contour lines. A woodWOP contour is only geometry;
    the machine cuts a contour only when a routing operation points at it, and
@@ -27,9 +29,10 @@ import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import cached_property
 from pathlib import Path
 
-import stroke_font
+import shapes
 
 # latin-1 maps every byte to one character and back, so decoding and
 # re-encoding never alters a single byte of the original file.
@@ -64,24 +67,45 @@ class LabelError(Exception):
 
 @dataclass
 class PartInfo:
-    length_mm: float
-    width_mm: float
+    length_mm: float  # blank X size
+    width_mm: float  # blank Y size
     unit: str | None = None
+    pieces: list[shapes.Piece] = field(default_factory=list)  # what the part cuts; empty = the whole blank
+    unclear: str | None = None  # why the pieces couldn't be worked out (then the board is labeled)
+
+    def __post_init__(self):
+        if not self.pieces:
+            self.pieces = [shapes.rectangle(0, 0, self.length_mm, self.width_mm)]
 
     @property
     def size_text(self) -> str:
-        """Length x width in inches, e.g. '95 1/4 x 12'."""
-        return f"{inches_text(self.length_mm)} x {inches_text(self.width_mm)}"
+        """Depth x width of each piece, e.g. '12 x 95 1/4' or '13 x 35 + 13 x 35'."""
+        sizes = " + ".join(
+            shapes.piece_size(p, inches_text) + ("" if p.is_rectangle else " (shaped)") for p in self.pieces
+        )
+        return sizes + (" (board - pieces unclear)" if self.unclear else "")
 
     @property
     def label(self) -> str:
-        return f"SIZE {self.size_text}" + (f" | {self.unit}" if self.unit else "")
+        """The hidden label text: every piece's size (and sides, for shaped pieces) and the unit."""
+        sizes = " + ".join(shapes.piece_description(p, inches_text) for p in self.pieces)
+        board = " (BOARD - PIECES UNCLEAR)" if self.unclear else ""
+        return f"SIZE {sizes}{board}" + (f" | {self.unit}" if self.unit else "")
+
+    @cached_property
+    def _layout(self) -> tuple[list[list[Point]], list[str]]:
+        return shapes.label_drawing(self.pieces, self.unit, inches_text)
 
     @property
     def drawing(self) -> list[list[Point]]:
-        """The size, with the unit under it, as polylines on the part (mm), one per
-        character. [] if the part is too small."""
-        return stroke_font.layout(self.length_mm, self.width_mm, self.size_text, self.unit or "")
+        """The label as polylines on the part (mm), one per character."""
+        return self._layout[0]
+
+    @property
+    def notes(self) -> list[str]:
+        """Why the board was labeled instead of its pieces, and anything there was no room to draw."""
+        board = [f"board size shown: {self.unclear}"] if self.unclear else []
+        return board + self._layout[1]
 
 
 @dataclass
@@ -112,13 +136,22 @@ def unit_from_name(file_name: str) -> str | None:
     """The unit a part is for, from its file name.
 
     WHE_TABBY_1071128_ROSENBAUM_SHARI_L_CEP_U12_X1.mpr -> 'U12'
+    RIST_BAR_OAK_1087516_HIS_L_SHELF_TOP_ES_UNIT_7_X1.mpr -> 'U7'
 
-    The last ``U`` + number piece after the job number (the first run of 5+
-    digits), or anywhere in the name if there's no job number. None if there is none.
+    The last unit (``U12``, ``UNIT12`` or ``UNIT_12``) after the job number (the
+    first run of 5+ digits), or anywhere in the name if there's no job number.
+    None if there is none.
     """
     tokens = [t for t in re.split(r"[_\s-]+", Path(file_name).stem) if t]
     job = next((i for i, t in enumerate(tokens) if re.fullmatch(r"\d{5,}", t)), -1)
-    units = [t.upper() for t in tokens[job + 1 :] if re.fullmatch(r"U\d+[A-Z]?", t, re.IGNORECASE)]
+    rest = tokens[job + 1 :]
+    units = []
+    for i, t in enumerate(rest):
+        m = re.fullmatch(r"U(?:NIT)?(\d+[A-Z]?)", t, re.IGNORECASE)
+        if m:
+            units.append("U" + m.group(1).upper())
+        elif t.upper() == "UNIT" and i + 1 < len(rest) and re.fullmatch(r"\d+[A-Z]?", rest[i + 1], re.IGNORECASE):
+            units.append("U" + rest[i + 1].upper())
     return units[-1] if units else None
 
 
@@ -166,13 +199,13 @@ def is_sheet(lines: list[str]) -> bool:
 
 
 def to_mm(value: str | None, variables: dict[str, str]) -> float | None:
-    """A number, or a variable name whose value is a number. Anything else -> None."""
+    """A number, a variable, or simple arithmetic of them (``bsd+tsd+ma``). Anything
+    that can't be worked out -> None."""
     if value is None:
         return None
-    value = variables.get(value.strip(), value).strip()
     try:
-        return float(value)
-    except ValueError:
+        return shapes.evaluate(value, variables)
+    except shapes.EvalError:
         return None
 
 
@@ -255,18 +288,26 @@ def is_label_contour(c: Contour) -> bool:
 def contour_refs(lines: list[str]) -> list[tuple[str, int]]:
     """(operation, contour number) for every operation value that points at a
     contour, like a routing operation's ``EA="1:0"``."""
-    refs = []
-    op = None
-    for line in lines:
-        if line.startswith("<"):
-            op = line
-        elif line == "" or line.startswith(("]", "$", "[", "!")):
-            op = None
-        elif op:
+    return [(op, n) for op, _, numbers in contour_ops(lines) for n in numbers]
+
+
+def contour_ops(lines: list[str]) -> list[tuple[str, dict[str, str], list[int]]]:
+    """(operation line, its values, contour numbers it points at) for every
+    operation that points at a contour."""
+    out = []
+    op, values, numbers = None, {}, []
+    for line in lines + [""]:
+        if line.startswith("<") or line == "" or line.startswith(("]", "$", "[", "!")):
+            if op and numbers:
+                out.append((op, values, numbers))
+            op, values, numbers = (line, {}, []) if line.startswith("<") else (None, {}, [])
+        elif op and "=" in line:
+            key, value = line.split("=", 1)
+            values.setdefault(key, value.strip('"'))
             m = CONTOUR_REF_RE.match(line)
             if m:
-                refs.append((op, int(m.group(2))))
-    return refs
+                numbers.append(int(m.group(2)))
+    return out
 
 
 def contour_lines(number: int, poly: list[Point]) -> list[str]:
@@ -366,6 +407,13 @@ def strip_label(lines: list[str]) -> list[str]:
     return out
 
 
+def first_label_number(lines: list[str]) -> int:
+    """The number for the first drawn label contour: above every existing contour
+    and every contour number any operation points at, so nothing can ever point at one."""
+    numbers = [c.number for c in contours(lines)] + [n for _, n in contour_refs(lines)]
+    return max(numbers, default=0) + 1
+
+
 def label_lines(label: str, drawing: list[list[Point]], first_contour: int) -> list[str]:
     """Every line the label adds, for checking what was inserted."""
     out = [f'LABEL="{len(drawing)}"', f'KM="{label}"']
@@ -382,7 +430,7 @@ def insert_label(lines: list[str], label: str, drawing: list[list[Point]]) -> li
     # after the last contour (before the first operation).
     if drawing:
         cs = contours(out)
-        first = max((c.number for c in cs), default=0) + 1
+        first = first_label_number(out)
         if cs:
             at = cs[-1].end
         else:
@@ -425,13 +473,23 @@ def label_bytes(data: bytes, file_name: str = "") -> Result:
             return Result(PROBLEM if check.dangers else SHEET, check.message)
         if next((x for x in reversed(lines) if x.strip()), "") != "!":
             raise LabelError("file looks incomplete (no end mark); it may still be saving")
-        length, width, _ = read_size(lines)
-        info = PartInfo(length, width, unit_from_name(file_name))
-        drawing = info.drawing
-
+        blank = read_size(lines)
         base = strip_label(lines)
         if any(re.match(r"label\s*=", x, re.IGNORECASE) for x in base):
             raise LabelError("file already has its own LABEL variable")
+        cs, ops = contours(base), contour_ops(base)
+        missing = sorted({n for _, _, numbers in ops for n in numbers} - {c.number for c in cs})
+        if missing:
+            raise LabelError(f"an operation points at contour {missing[0]}, which isn't in the file")
+        variables = block_values(base, "[001")
+        try:
+            pieces, unclear = shapes.find_pieces(cs, ops, variables, blank, is_label_contour), None
+        except shapes.Unclear as e:
+            pieces, unclear = None, str(e)
+        pieces = pieces or [shapes.blank_piece(cs, ops, variables, blank, is_label_contour)]
+        info = PartInfo(blank[0], blank[1], unit_from_name(file_name), pieces, unclear)
+        drawing = info.drawing
+
         new_lines = insert_label(base, info.label, drawing)
         if new_lines == lines:
             return Result(ALREADY, "already labeled", info, drawing=drawing)
@@ -439,8 +497,8 @@ def label_bytes(data: bytes, file_name: str = "") -> Result:
         new_data = join_lines(new_lines, nl)
         verify(data, new_data, info.label, drawing)
         status = "label added" if base == lines else "label updated"
-        if not drawing:
-            status += " (part too small to draw on)"
+        if info.notes:
+            status += f" ({'; '.join(info.notes)})"
         return Result(LABELED, status, info, new_data, data, drawing)
     except LabelError as e:
         return Result(PROBLEM, str(e))
@@ -495,7 +553,7 @@ def verify(old: bytes, new: bytes, label: str, drawing: list[list[Point]]) -> No
     if removed is None or not all(is_label_line(x) for x in removed):
         raise LabelError("safety check failed: something other than an old label would be removed")
 
-    first = max((c.number for c in contours(kept)), default=0) + 1
+    first = first_label_number(kept)
     expected = label_lines(label, drawing, first)
     if find_line(kept, "[001") is None:
         expected += ["[001", ""]

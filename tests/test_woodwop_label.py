@@ -7,7 +7,8 @@ import stroke_font as sf
 import woodwop_label as wl
 
 SAMPLES = Path(__file__).resolve().parent.parent / "samples"
-PARTS = sorted(p for p in SAMPLES.iterdir() if "BOARD" not in p.name)
+PARTS = sorted(SAMPLES.glob("WHE_TABBY_*"))  # the end panels these tests were written around
+ALL_PARTS = sorted(p for p in SAMPLES.iterdir() if "BOARD" not in p.name)
 BOARD = next(SAMPLES.glob("*BOARD*"))
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -29,7 +30,7 @@ def test_label_only_inserts_label_lines(path):
     r = wl.label_bytes(old, path.name)
     assert r.status == wl.LABELED
     unit = wl.unit_from_name(path.name)
-    km = f'KM="SIZE 95 1/4 x 12 | {unit}"'
+    km = f'KM="SIZE 12 x 95 1/4 | {unit}"'
     assert len(r.drawing) == 8 + 3  # 9 5 1 / 4 x 1 2, then U 1 2
 
     # Build the expected file by hand: the original lines with the label put in.
@@ -186,7 +187,7 @@ def test_renamed_file_gets_its_new_unit():
     path = PARTS[0]
     as_u12 = labeled(path).new_data
     r = wl.label_bytes(as_u12, path.name.replace("_U12_", "_U7_"))
-    assert r.status == wl.LABELED and r.info.label == "SIZE 95 1/4 x 12 | U7"
+    assert r.status == wl.LABELED and r.info.label == "SIZE 12 x 95 1/4 | U7"
 
 
 @pytest.mark.parametrize(
@@ -212,7 +213,7 @@ def test_original_files_untouched_by_planning():
 def test_size_and_label_text():
     r = labeled(PARTS[0])
     assert (r.info.length_mm, r.info.width_mm) == (2419.35, 304.8)
-    assert r.info.label == "SIZE 95 1/4 x 12 | U12" and r.info.size_text == "95 1/4 x 12"
+    assert r.info.label == "SIZE 12 x 95 1/4 | U12" and r.info.size_text == "12 x 95 1/4"  # depth x width
     assert r.info.unit == "U12"
 
 
@@ -247,7 +248,7 @@ def test_unit_is_drawn_smaller_and_centered_under_the_size():
 
 def test_no_unit_in_name_draws_size_only():
     r = wl.label_bytes(PARTS[0].read_bytes(), "SOMETHING_1071128_CEP.mpr")
-    assert r.info.label == "SIZE 95 1/4 x 12" and len(r.drawing) == 8
+    assert r.info.label == "SIZE 12 x 95 1/4" and len(r.drawing) == 8
 
 
 def test_unit_left_off_when_too_small_to_read():
@@ -370,8 +371,8 @@ def test_tiny_part_gets_size_in_variables_only():
     small = (old.replace(b"_BSX=2419.350000", b"_BSX=20.000000").replace(b"_BSY=304.800000", b"_BSY=8.000000")
              .replace(b'l="2419.35"', b'l="20"').replace(b'w="304.8"', b'w="8"'))
     r = wl.label_bytes(small)
-    assert r.status == wl.LABELED and r.drawing == [] and "too small" in r.message
-    assert b'LABEL="0"\r\nKM="SIZE 13/16 x 5/16"' in r.new_data and wl.unlabel_bytes(r.new_data).new_data == small
+    assert r.status == wl.LABELED and r.drawing == [] and "no room" in r.message
+    assert b'LABEL="0"\r\nKM="SIZE 5/16 x 13/16"' in r.new_data and wl.unlabel_bytes(r.new_data).new_data == small
 
 
 # ---------------------------------------------------------------- saving
@@ -385,13 +386,13 @@ def test_save_in_place_with_backup(tmp_path):
     backups = tmp_path / "backups"
 
     assert wl.main([str(work), "--backup-dir", str(backups)]) == 0
-    for p in PARTS:
+    for p in ALL_PARTS:
         assert (work / p.name).read_bytes() == labeled(p).new_data
     assert (work / BOARD.name).read_bytes() == BOARD.read_bytes()
     assert sorted(f.name for f in work.iterdir()) == sorted(p.name for p in SAMPLES.iterdir())  # no temp files left
     (run,) = backups.iterdir()
-    assert sorted(f.name for f in run.iterdir()) == sorted(p.name for p in PARTS)
-    for p in PARTS:
+    assert sorted(f.name for f in run.iterdir()) == sorted(p.name for p in ALL_PARTS)
+    for p in ALL_PARTS:
         assert (run / p.name).read_bytes() == p.read_bytes()
 
     # remove puts every file back exactly

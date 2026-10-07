@@ -59,8 +59,8 @@ class App:
         self.auto_backup_dir: Path | None = None
 
         root.title(TITLE)
-        root.geometry("1000x680")
-        root.minsize(760, 520)
+        root.geometry("1000x760")
+        root.minsize(760, 600)
 
         top = ttk.Frame(root, padding=(10, 10, 10, 4))
         top.pack(fill="x")
@@ -78,10 +78,10 @@ class App:
         cols = ("file", "size", "unit", "status")
         self.table = ttk.Treeview(mid, columns=cols, show="headings", selectmode="browse")
         for col, text, width, stretch in (
-            ("file", "File", 400, True),
-            ("size", "Size (in)  L x W", 140, False),
+            ("file", "File", 360, True),
+            ("size", "Size (in)  depth x width", 200, False),
             ("unit", "Unit", 60, False),
-            ("status", "Status", 300, True),
+            ("status", "Status", 280, True),
         ):
             self.table.heading(col, text=text, anchor="w")
             self.table.column(col, width=width, stretch=stretch, anchor="w")
@@ -94,7 +94,7 @@ class App:
         scroll.pack(side="right", fill="y")
         self.table.bind("<<TreeviewSelect>>", self.show_selected)
 
-        self.preview = tk.Canvas(root, height=170, background="#c8d4f0", highlightthickness=0)
+        self.preview = tk.Canvas(root, height=240, background="#c8d4f0", highlightthickness=0)
         self.preview.pack(fill="x", padx=10, pady=(6, 0))
         self.preview.bind("<Configure>", lambda _e: self.show_selected())
 
@@ -189,7 +189,7 @@ class App:
         self.draw_preview(self.results.get(Path(sel[0])) if sel else None)
 
     def draw_preview(self, r: wl.Result | None):
-        """The part outline with the label drawn on it, as it will look in woodWOP."""
+        """The pieces the part cuts, with the label drawn on them, as it will look in woodWOP."""
         c = self.preview
         c.delete("all")
         if not r or not r.info:
@@ -200,12 +200,22 @@ class App:
         length, width = r.info.length_mm, r.info.width_mm
         k = min((cw - 24) / length, (ch - 24) / width)
         ox, oy = (cw - length * k) / 2, (ch - width * k) / 2
-        c.create_rectangle(ox, oy, ox + length * k, oy + width * k, outline="#d32f2f", width=2)
+        def screen(points):
+            return [v for x, y in points for v in (ox + x * k, oy + (width - y) * k)]
+
+        c.create_rectangle(ox, oy, ox + length * k, oy + width * k, outline="#8899bb")  # the blank
+        for piece in r.info.pieces:
+            c.create_polygon(*screen(piece.points), outline="#d32f2f", fill="", width=2)
+            for hole in piece.holes:
+                if len(hole) >= 3:
+                    c.create_polygon(*screen(hole), outline="#d32f2f", fill="", width=1)
+                elif len(hole) == 2:  # a round cutout: just its chord
+                    c.create_line(*screen(hole), fill="#d32f2f")
         for poly in r.drawing:
-            c.create_line(*[v for x, y in poly for v in (ox + x * k, oy + (width - y) * k)], fill="black")
+            c.create_line(*screen(poly), fill="black")
         if not r.drawing:
             c.create_text(cw / 2, ch / 2, fill="#555555",
-                          text="Part too small to draw on - the size is still added to its variable list.")
+                          text="No room to draw the label here - the sizes are still added to its variable list.")
 
     def update_buttons(self):
         to_label = any(r.status == wl.LABELED for r in self.results.values())
