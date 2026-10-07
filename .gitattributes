@@ -1,0 +1,3 @@
+# WoodWOP programs must never be altered by git (CRLF line endings, ISO-8859 text)
+*.mpr binary
+*.MPR binary
