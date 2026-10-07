@@ -1,13 +1,14 @@
 """Add a part-size label to woodWOP .mpr part programs without touching any machining.
 
-The label is the part's length x width in inches (e.g. ``95 1/4 x 12``). It is
-written in two places, neither of which the machine ever runs:
+The label is the part's length x width in inches (e.g. ``95 1/4 x 12``) with the
+unit the part is for (e.g. ``U12``, from the file name) under it. It is written
+in two places, neither of which the machine ever runs:
 
 1. **Drawn on the part** as contour lines. A woodWOP contour is only geometry;
    the machine cuts a contour only when a routing operation points at it, and
    nothing ever points at these. Each character is one open line, so it can
    never look like a cutout.
-2. A ``LABEL`` entry in the part's variable list (``[001``) with the size as its
+2. A ``LABEL`` entry in the part's variable list (``[001``) with the label as its
    comment. Its value is the number of drawn label contours, which is how the
    drawing is found again for updating or removing it.
 
@@ -65,6 +66,7 @@ class LabelError(Exception):
 class PartInfo:
     length_mm: float
     width_mm: float
+    unit: str | None = None
 
     @property
     def size_text(self) -> str:
@@ -73,12 +75,13 @@ class PartInfo:
 
     @property
     def label(self) -> str:
-        return f"SIZE {self.size_text}"
+        return f"SIZE {self.size_text}" + (f" | {self.unit}" if self.unit else "")
 
     @property
     def drawing(self) -> list[list[Point]]:
-        """The size as polylines on the part (mm), one per character. [] if the part is too small."""
-        return stroke_font.layout(self.length_mm, self.width_mm, self.size_text)
+        """The size, with the unit under it, as polylines on the part (mm), one per
+        character. [] if the part is too small."""
+        return stroke_font.layout(self.length_mm, self.width_mm, self.size_text, self.unit or "")
 
 
 @dataclass
@@ -103,6 +106,20 @@ def inches_text(mm: float) -> str:
     g = math.gcd(rem, FRACTION_DENOMINATOR)
     frac = f"{rem // g}/{FRACTION_DENOMINATOR // g}"
     return f"{whole} {frac}" if whole else frac
+
+
+def unit_from_name(file_name: str) -> str | None:
+    """The unit a part is for, from its file name.
+
+    WHE_TABBY_1071128_ROSENBAUM_SHARI_L_CEP_U12_X1.mpr -> 'U12'
+
+    The last ``U`` + number piece after the job number (the first run of 5+
+    digits), or anywhere in the name if there's no job number. None if there is none.
+    """
+    tokens = [t for t in re.split(r"[_\s-]+", Path(file_name).stem) if t]
+    job = next((i for i, t in enumerate(tokens) if re.fullmatch(r"\d{5,}", t)), -1)
+    units = [t.upper() for t in tokens[job + 1 :] if re.fullmatch(r"U\d+[A-Z]?", t, re.IGNORECASE)]
+    return units[-1] if units else None
 
 
 # ---------------------------------------------------------------- file structure
@@ -394,8 +411,11 @@ def insert_label(lines: list[str], label: str, drawing: list[list[Point]]) -> li
     return out
 
 
-def label_bytes(data: bytes) -> Result:
-    """Work out the labeled version of one part file. Nothing is written here."""
+def label_bytes(data: bytes, file_name: str = "") -> Result:
+    """Work out the labeled version of one part file. Nothing is written here.
+
+    ``file_name`` is where the unit number comes from.
+    """
     try:
         lines, nl = split_lines(data)
         if find_line(lines, "[H") is None:
@@ -406,7 +426,7 @@ def label_bytes(data: bytes) -> Result:
         if next((x for x in reversed(lines) if x.strip()), "") != "!":
             raise LabelError("file looks incomplete (no end mark); it may still be saving")
         length, width, _ = read_size(lines)
-        info = PartInfo(length, width)
+        info = PartInfo(length, width, unit_from_name(file_name))
         drawing = info.drawing
 
         base = strip_label(lines)
@@ -526,7 +546,7 @@ def new_backup_dir(root: Path | None = None) -> Path:
 
 def plan(path: Path, remove: bool = False) -> Result:
     data = path.read_bytes()
-    return unlabel_bytes(data) if remove else label_bytes(data)
+    return unlabel_bytes(data) if remove else label_bytes(data, path.name)
 
 
 def save(path: Path, result: Result, backup_dir: Path) -> None:

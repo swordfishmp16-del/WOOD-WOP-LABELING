@@ -82,22 +82,36 @@ def text_polylines(text: str) -> list[list[Point]]:
     return out
 
 
-def layout(length: float, width: float, text: str) -> list[list[Point]]:
-    """Polylines (mm, part coordinates) for ``text`` centered on a length x width part.
+def layout(length: float, width: float, text: str, sub: str = "") -> list[list[Point]]:
+    """Polylines (mm, part coordinates) for ``text`` centered on a length x width part,
+    with ``sub`` (if any) smaller and centered under it.
 
-    Text runs along the longer side. It is as big as fits, up to 50 mm tall and
-    30% of the part's short side, so smaller parts get smaller text. Returns []
-    if the part is too small for text at least 3 mm tall.
+    Text runs along the longer side. The main line is as big as fits, up to 50 mm
+    tall and 30% of the part's short side, so smaller parts get smaller text; the
+    second line is 60% of that. Returns [] if the main line can't be at least
+    3 mm tall; leaves the second line off if it can't be at least 3 mm tall.
     """
     rotate = width > length
     long_side, short_side = (width, length) if rotate else (length, width)
-    h = min(50.0, short_side * 0.3, long_side * 0.85 * CAP / text_width(text))
+    max_w = long_side * 0.85
+    h = min(50.0, short_side * 0.3, max_w * CAP / text_width(text))
     if h < 3.0:
         return []
+    lines = [(text, h)]
+    if sub:
+        h2 = min(h * 0.6, max_w * CAP / text_width(sub))
+        if h2 >= 3.0:
+            lines.append((sub, h2))
 
-    scale = h / CAP
-    x0, y0 = -text_width(text) * scale / 2, -h / 2
-    out = [[(x0 + gx * scale, y0 + gy * scale) for gx, gy in poly] for poly in text_polylines(text)]
+    # The block is at most 2 x h tall (h + gap 0.4h + 0.6h), centered on the part.
+    gap = 0.4 * h
+    top = (sum(hh for _, hh in lines) + gap * (len(lines) - 1)) / 2
+    out: list[list[Point]] = []
+    for line, hh in lines:
+        scale = hh / CAP
+        x0, y0 = -text_width(line) * scale / 2, top - hh
+        out += [[(x0 + gx * scale, y0 + gy * scale) for gx, gy in poly] for poly in text_polylines(line)]
+        top = y0 - gap
 
     cx, cy = length / 2, width / 2
     if rotate:  # read bottom to top along the part's Y

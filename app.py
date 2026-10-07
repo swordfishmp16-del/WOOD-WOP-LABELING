@@ -75,12 +75,13 @@ class App:
 
         mid = ttk.Frame(root, padding=(10, 0))
         mid.pack(fill="both", expand=True)
-        cols = ("file", "size", "status")
+        cols = ("file", "size", "unit", "status")
         self.table = ttk.Treeview(mid, columns=cols, show="headings", selectmode="browse")
         for col, text, width, stretch in (
-            ("file", "File", 420, True),
-            ("size", "Label (in)  L x W", 150, False),
-            ("status", "Status", 330, True),
+            ("file", "File", 400, True),
+            ("size", "Size (in)  L x W", 140, False),
+            ("unit", "Unit", 60, False),
+            ("status", "Status", 300, True),
         ):
             self.table.heading(col, text=text, anchor="w")
             self.table.column(col, width=width, stretch=stretch, anchor="w")
@@ -166,7 +167,8 @@ class App:
                 status = STATUS_TEXT.get(r.status, r.message)
                 tag = "skip" if r.status in (wl.ALREADY, wl.NO_LABEL, WAITING) else ""
             size = r.info.size_text if r.info else ""
-            self.table.insert("", "end", iid=str(f), values=(f.name, size, status), tags=(tag,))
+            unit = (r.info.unit or "none") if r.info else ""
+            self.table.insert("", "end", iid=str(f), values=(f.name, size, unit, status), tags=(tag,))
         if selected and self.table.exists(selected[0]):
             self.table.selection_set(selected[0])
         if self.files and not self.done:

@@ -1,20 +1,29 @@
 # Wood WOP Labeling
 
-Draws each part's size (length x width, in inches) on woodWOP part files
-(`.mpr`), so the size shows on the part and travels with it into woodNest and
+Draws each part's size (length x width, in inches) and its unit number on
+woodWOP part files (`.mpr`), so they show on the part and travels with it into woodNest and
 onto the sheet. **No machining changes**, and the label is **never routed**.
 
 ![Wood WOP Labeling window](docs/app.png)
 
 ## What the label is
 
-`95 1/4 x 12` for a 2419.35 x 304.8 mm part:
+For `WHE_TABBY_1071128_ROSENBAUM_SHARI_L_CEP_U12_X1.mpr` (2419.35 x 304.8 mm):
 
-- Length x width, rounded to the nearest 1/16". Read from the part's rough
-  exterior size in the file.
-- Drawn centered on the part, along its longer side. The text is up to 50 mm
-  (about 2") tall and shrinks on smaller parts, down to 3 mm. A part too small
-  for that gets the size in its variable list only, with no drawing.
+```
+95 1/4 x 12
+    U12
+```
+
+- **Size**: length x width, rounded to the nearest 1/16". Read from the part's
+  rough exterior size in the file.
+- **Unit**: the last `U` + number in the file name after the job number
+  (`..._CEP_U12_X1` -> `U12`). Drawn smaller (60%), centered under the size. If
+  the file name has no unit, only the size is drawn.
+- Drawn centered on the part, along its longer side. The size is up to 50 mm
+  (about 2") tall and shrinks on smaller parts, down to 3 mm. The unit is left
+  off if it would be under 3 mm. A part too small for the size gets the label in
+  its variable list only, with no drawing.
 
 It's written in two places, neither of which the machine runs:
 
@@ -23,8 +32,8 @@ It's written in two places, neither of which the machine runs:
    routing operation points at it, and **nothing ever points at these**. Each
    character is one open line that never closes, so woodNest can't mistake a
    letter for a cutout.
-2. **A `LABEL` entry at the end of the part's variable list**, with the size as
-   its comment (`KM="SIZE 95 1/4 x 12"`). Its value is the number of drawn
+2. **A `LABEL` entry at the end of the part's variable list**, with the label as
+   its comment (`KM="SIZE 95 1/4 x 12 | U12"`). Its value is the number of drawn
    characters. That's how the app finds the drawing again to update or remove
    it, and your checking AI can read the size here.
 
@@ -33,8 +42,8 @@ In the file:
 ```
 bfb="57"
 KM="bore from back"
-LABEL="8"                    <- added (8 drawn characters)
-KM="SIZE 95 1/4 x 12"        <- added
+LABEL="11"                   <- added (11 drawn characters)
+KM="SIZE 95 1/4 x 12 | U12"  <- added
 
 ]1                           <- the part's own outline (unchanged)
 ...
@@ -43,7 +52,7 @@ $E0
 KP
 X=...
 ...
-]9                           <- added: drawn "2"
+]12                          <- added: drawn "2" of U12
 ...
 <100 \WerkStck\              <- everything from here down is unchanged
 ...
@@ -97,14 +106,14 @@ tick **Auto-label new files in this folder**. While the window stays open:
 - Before a file is replaced, the original is copied to
   `Documents\WoodWOP Label Backups\<date and time>\`.
 - A file that already has the right label is left alone. Running it twice is safe.
-- If a part's size changes, its label is updated.
+- If a part's size or file name (unit) changes, its label is updated.
 - If the size in the file header doesn't match the part's own size settings,
   the file is skipped and marked as a problem. A stale header could otherwise
   give a wrong label.
 - **Remove Labels** takes the label back out. The file returns to exactly its
   original bytes.
-- Files labeled by the earlier test versions (size, job and part) are
-  upgraded to the current label automatically.
+- Files labeled by any earlier version are upgraded to the current label
+  automatically.
 
 ## For developers
 

@@ -17,7 +17,7 @@ def lines_of(data: bytes) -> list[str]:
 
 
 def labeled(path: Path) -> wl.Result:
-    return wl.label_bytes(path.read_bytes())
+    return wl.label_bytes(path.read_bytes(), path.name)
 
 
 # ---------------------------------------------------------------- what gets written
@@ -26,10 +26,11 @@ def labeled(path: Path) -> wl.Result:
 @pytest.mark.parametrize("path", PARTS, ids=lambda p: p.name)
 def test_label_only_inserts_label_lines(path):
     old = path.read_bytes()
-    r = wl.label_bytes(old)
+    r = wl.label_bytes(old, path.name)
     assert r.status == wl.LABELED
-    km = 'KM="SIZE 95 1/4 x 12"'
-    assert len(r.drawing) == 8  # 9 5 1 / 4 x 1 2
+    unit = wl.unit_from_name(path.name)
+    km = f'KM="SIZE 95 1/4 x 12 | {unit}"'
+    assert len(r.drawing) == 8 + 3  # 9 5 1 / 4 x 1 2, then U 1 2
 
     # Build the expected file by hand: the original lines with the label put in.
     expected = lines_of(old)
@@ -161,36 +162,44 @@ def test_sheet_check_flags_missing_contour():
 @pytest.mark.parametrize("path", PARTS, ids=lambda p: p.name)
 def test_remove_restores_exact_original(path):
     old = path.read_bytes()
-    r = wl.unlabel_bytes(wl.label_bytes(old).new_data)
+    r = wl.unlabel_bytes(wl.label_bytes(old, path.name).new_data)
     assert r.status == wl.REMOVED and r.new_data == old
 
 
 @pytest.mark.parametrize("path", PARTS, ids=lambda p: p.name)
 def test_labeling_twice_changes_nothing(path):
-    assert wl.label_bytes(labeled(path).new_data).status == wl.ALREADY
+    assert wl.label_bytes(labeled(path).new_data, path.name).status == wl.ALREADY
 
 
 def test_relabel_replaces_old_label():
     path = PARTS[0]
     old = path.read_bytes()
     bigger = old.replace(b"_BSX=2419.350000", b"_BSX=2438.400000").replace(b'l="2419.35"', b'l="2438.4"')
-    first = wl.label_bytes(bigger).new_data  # labeled as 96 x 12
+    first = wl.label_bytes(bigger, path.name).new_data  # labeled as 96 x 12
     back = first.replace(b"_BSX=2438.400000", b"_BSX=2419.350000").replace(b'l="2438.4"', b'l="2419.35"')
-    r = wl.label_bytes(back)  # size went back to 95 1/4: label must follow
+    r = wl.label_bytes(back, path.name)  # size went back to 95 1/4: label must follow
     assert r.status == wl.LABELED and r.message == "label updated"
-    assert r.new_data == wl.label_bytes(old).new_data
+    assert r.new_data == labeled(path).new_data
 
 
-@pytest.mark.parametrize("fixture", ["v1_comment_label_CEP_U12.mpr", "v2_drawn_label_CEP_U12.mpr"])
-def test_upgrades_files_labeled_by_earlier_test_versions(fixture):
-    """The test files sent earlier (comment-only, and size+job+part drawing) upgrade cleanly."""
+def test_renamed_file_gets_its_new_unit():
     path = PARTS[0]
-    old = path.read_bytes()
+    as_u12 = labeled(path).new_data
+    r = wl.label_bytes(as_u12, path.name.replace("_U12_", "_U7_"))
+    assert r.status == wl.LABELED and r.info.label == "SIZE 95 1/4 x 12 | U7"
+
+
+@pytest.mark.parametrize(
+    "fixture", ["v1_comment_label_CEP_U12.mpr", "v2_drawn_label_CEP_U12.mpr", "v3_size_only_label_CEP_U12.mpr"]
+)
+def test_upgrades_files_labeled_by_earlier_versions(fixture):
+    """Files labeled by earlier versions (comment only; size+job+part; size only) upgrade cleanly."""
+    path = PARTS[0]
     earlier = (FIXTURES / fixture).read_bytes()
-    r = wl.label_bytes(earlier)
+    r = wl.label_bytes(earlier, path.name)
     assert r.status == wl.LABELED and r.message == "label updated"
-    assert r.new_data == wl.label_bytes(old).new_data
-    assert wl.unlabel_bytes(earlier).new_data == old
+    assert r.new_data == labeled(path).new_data
+    assert wl.unlabel_bytes(earlier).new_data == path.read_bytes()
 
 
 def test_original_files_untouched_by_planning():
@@ -203,7 +212,47 @@ def test_original_files_untouched_by_planning():
 def test_size_and_label_text():
     r = labeled(PARTS[0])
     assert (r.info.length_mm, r.info.width_mm) == (2419.35, 304.8)
-    assert r.info.label == "SIZE 95 1/4 x 12" and r.info.size_text == "95 1/4 x 12"
+    assert r.info.label == "SIZE 95 1/4 x 12 | U12" and r.info.size_text == "95 1/4 x 12"
+    assert r.info.unit == "U12"
+
+
+@pytest.mark.parametrize(
+    "name, unit",
+    [
+        ("WHE_TABBY_1071128_ROSENBAUM_SHARI_L_CEP_U12_X1.mpr", "U12"),
+        ("WHE_TABBY_1071128_ROSENBAUM_SHARI_L_REP_U13_X1.mpr", "U13"),
+        ("WHITE_1234567_SMITH_J_FS_U3.mpr", "U3"),
+        ("X_1234567_A_SH_u4b_X2.mpr", "U4B"),
+        ("U9_9999999_NO_UNIT_AFTER_JOB.mpr", None),  # U9 is before the job number
+        ("WHEAT_TAB_1071128_BOARD_2.MPR", None),
+        ("plain.mpr", None),
+        ("", None),
+    ],
+)
+def test_unit_from_name(name, unit):
+    assert wl.unit_from_name(name) == unit
+
+
+def test_unit_is_drawn_smaller_and_centered_under_the_size():
+    r = labeled(PARTS[0])
+    size_polys, unit_polys = r.drawing[:8], r.drawing[8:]
+    assert len(unit_polys) == 3
+    size_ys = [y for p in size_polys for _, y in p]
+    unit_ys = [y for p in unit_polys for _, y in p]
+    assert max(unit_ys) < min(size_ys)  # below the size line
+    assert max(unit_ys) - min(unit_ys) == pytest.approx(0.6 * (max(size_ys) - min(size_ys)), abs=0.01)
+    unit_xs = [x for p in unit_polys for x, _ in p]
+    assert (max(unit_xs) + min(unit_xs)) / 2 == pytest.approx(2419.35 / 2, abs=1)
+
+
+def test_no_unit_in_name_draws_size_only():
+    r = wl.label_bytes(PARTS[0].read_bytes(), "SOMETHING_1071128_CEP.mpr")
+    assert r.info.label == "SIZE 95 1/4 x 12" and len(r.drawing) == 8
+
+
+def test_unit_left_off_when_too_small_to_read():
+    full = sf.layout(100, 14, "3 15/16 x 9/16", "U2")
+    assert full == sf.layout(100, 14, "3 15/16 x 9/16")  # unit would be under 3 mm, so size only
 
 
 def test_stale_header_is_refused():
@@ -272,7 +321,7 @@ def test_old_comment_block_resaved_by_woodwop_is_still_removed():
     resaved = v1.replace(b"<101 \\Kommentar\\\r\n" + km + b"\r\n",
                          b"<101 \\Kommentar\\\r\n" + km + b'\r\nKAT="Kommentar"\r\nMNM="Comment"\r\n')
     assert resaved != v1
-    assert wl.label_bytes(resaved).new_data == labeled(path).new_data
+    assert wl.label_bytes(resaved, path.name).new_data == labeled(path).new_data
     assert wl.unlabel_bytes(resaved).new_data == path.read_bytes()
 
 
