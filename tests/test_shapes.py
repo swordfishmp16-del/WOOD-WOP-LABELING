@@ -184,14 +184,18 @@ def test_curved_side_gets_no_number():
     assert len(r.drawing) == sum(visible(s) for s in sides) + visible("13 3/4 x 35 7/16") + visible("U2")
 
 
-def test_cutout_is_not_a_piece_and_labels_avoid_it():
+def test_cutout_gets_its_own_size_inside_it_and_the_piece_label_stays_off_it():
     outer = poly([(0, 0), (900, 0), (900, 400), (0, 400)])
-    hole_pts = [(380, 140), (520, 140), (520, 260), (380, 260)]
+    hole_pts = [(380, 140), (520, 140), (520, 260), (380, 260)]  # 120 deep x 140 wide
     r = wl.label_bytes(make_mpr([outer, poly(hole_pts)], [1, 2], 900, 400), "X_1234567_GROMMET_U1.mpr")
     (piece,) = r.info.pieces
-    assert len(piece.holes) == 1 and r.info.label == "SIZE 15 3/4 x 35 7/16 | U1"
-    assert r.drawing and all_inside(r.drawing, piece.points)
-    assert not any(shapes.inside(p, hole_pts) for line in r.drawing for p in line)
+    assert len(piece.holes) == 1 and r.info.notes == []
+    assert r.info.label == "SIZE 15 3/4 x 35 7/16 (CUTOUTS 4 3/4 x 5 1/2) | U1"
+    in_hole = [line for line in r.drawing if all(shapes.inside(p, hole_pts) for p in line)]
+    rest = [line for line in r.drawing if line not in in_hole]
+    assert len(in_hole) == visible("4 3/4 x 5 1/2") + visible("CUTOUT")
+    assert len(rest) == visible("15 3/4 x 35 7/16") + visible("U1")
+    assert not any(shapes.inside(p, hole_pts) for p in points_of(rest))
 
 
 def test_groove_along_an_open_path_is_ignored():
@@ -289,14 +293,17 @@ def test_curve_with_unknown_radius_plays_safe():
     assert r.info.label.startswith("SIZE 15 3/4 x 35 7/16")  # still in the variable list
 
 
-def test_round_cutout_keeps_labels_off_it():
+def test_round_cutout_gets_its_diameter_and_the_piece_label_stays_off_it():
     outer = poly([(0, 0), (900, 0), (900, 400), (0, 400)])
     circle = [("KP", {"X": 400, "Y": 200, "Z": "0.0", "KO": "00"}),
               ("KA", {"X": 500, "Y": 200, "R": "50"}), ("KA", {"X": 400, "Y": 200, "R": "50"})]
     r = wl.label_bytes(make_mpr([outer, circle], [1, 2], 900, 400), "X_1234567_GROMMET_U1.mpr")
     (piece,) = r.info.pieces
-    assert r.info.label == "SIZE 15 3/4 x 35 7/16 | U1" and piece.keepout
-    assert r.drawing and not any(math.dist(p, (450, 200)) < 52 for p in points_of(r.drawing))
+    assert r.info.label == "SIZE 15 3/4 x 35 7/16 (CUTOUTS 3 15/16 DIA) | U1" and piece.keepout
+    near = [line for line in r.drawing if all(math.dist(p, (450, 200)) < 50 for p in line)]
+    rest = [line for line in r.drawing if line not in near]
+    assert len(near) == visible("3 15/16 DIA") + visible("CUTOUT")
+    assert rest and not any(math.dist(p, (450, 200)) < 52 for p in points_of(rest))
 
 
 def test_shallow_routed_outline_is_not_a_piece():
@@ -328,7 +335,8 @@ def test_notch_routed_on_an_edge_is_a_cutout_not_a_piece():
     notch = poly([(400, 350), (500, 350), (500, 400), (400, 400)])
     r = wl.label_bytes(make_mpr([outer, notch], [1, 2], 900, 400), "X_1234567_U1.mpr")
     (piece,) = r.info.pieces
-    assert len(piece.holes) == 1 and r.info.label == "SIZE 15 3/4 x 35 7/16 | U1"
+    assert len(piece.holes) == 1
+    assert r.info.label == "SIZE 15 3/4 x 35 7/16 (CUTOUTS 1 15/16 x 3 15/16) | U1"  # 50 deep x 100 wide
 
 
 def test_piece_cut_from_a_cutout_is_its_own_piece():
@@ -368,10 +376,18 @@ def test_cutout_in_an_insert_cut_from_a_cutout_belongs_to_the_insert():
     insert = poly([(420, 170), (780, 170), (780, 430), (420, 430)])
     grommet = poly([(550, 250), (650, 250), (650, 350), (550, 350)])
     r = wl.label_bytes(make_mpr([desk, hole, insert, grommet], [1, 2, 3, 4], 1200, 600), "X_1234567_U1.mpr")
-    assert len(r.info.pieces) == 2
+    assert len(r.info.pieces) == 2 and r.info.notes == []
     insert_piece = min(r.info.pieces, key=lambda p: p.width)
     assert len(insert_piece.holes) == 1
-    assert not any(550 <= x <= 650 and 250 <= y <= 350 for x, y in points_of(r.drawing))
+    grommet_pts = [(550, 250), (650, 250), (650, 350), (550, 350)]
+    in_grommet = [line for line in r.drawing if all(shapes.inside(p, grommet_pts) for p in line)]
+    assert len(in_grommet) == visible("3 15/16 x 3 15/16") + visible("CUTOUT")
+    # The desk's cutout has the insert in it, so its size goes beside it, not over the insert:
+    # inside the cutout there's only the insert's own label and its grommet's.
+    hole_pts = [(400, 150), (800, 150), (800, 450), (400, 450)]
+    in_hole = [line for line in r.drawing if all(shapes.inside(p, hole_pts) for p in line)]
+    assert len(in_hole) == len(in_grommet) + visible("10 1/4 x 14 3/16") + visible("U1")
+    assert "(CUTOUTS 11 13/16 x 15 3/4)" in r.info.label
 
 
 def test_open_line_cut_through_labels_the_board_and_says_so():
@@ -408,3 +424,256 @@ def test_contour_refs_and_ops_agree():
     for path in ALL_PARTS:
         lines = lines_of(path.read_bytes())
         assert wl.contour_refs(lines) == [(op, n) for op, _, ns in wl.contour_ops(lines) for n in ns]
+
+
+# ---------------------------------------------------------------- LED backs, depths, cutouts, units, safety
+
+CEMENTO = SAMPLES / "CEMENTO_1089489_BACK_U13_X1.mpr"
+REBORE = SAMPLES / "REBORE_1072650_BACKING_WITH_LED_STRIP_U13.mpr"
+
+
+def groove_path(path: Path):
+    lines = lines_of(path.read_bytes())
+    (groove,) = [c for c in wl.contours(lines) if c.number == 2]
+    raw, curved, arcs = shapes.outline(groove.elements, wl.block_values(lines, "[001"))
+    return raw
+
+
+@pytest.mark.parametrize("path, label", [
+    (CEMENTO, "SIZE 60 x 47 1/2 | U13"),
+    (REBORE, "SIZE 37 x 58 | U13"),
+])
+def test_led_backs_are_labeled_in_the_middle_clear_of_the_light_groove(path, label):
+    r = labeled(path)
+    assert r.status == wl.LABELED and r.info.label == label and r.info.notes == []
+    (piece,) = r.info.pieces
+    assert piece.is_rectangle and not piece.cutouts  # the groove is not a piece or a cutout
+    size = label.split("SIZE ")[1].split(" |")[0]
+    assert len(r.drawing) == visible(size) + visible("U13")
+    raw = groove_path(path)
+    for p in points_of(r.drawing):  # every label point is well clear of the groove's line
+        assert min(shapes.seg_dist(p, a, b) for a, b in zip(raw, raw[1:])) > shapes.GROOVE_HALF
+
+
+@pytest.mark.parametrize("path", [CEMENTO, REBORE], ids=lambda p: p.name)
+def test_led_backs_labeled_as_board_fallback_get_fixed(path):
+    earlier = (FIXTURES / ("v5_board_fallback_" + path.name)).read_bytes()
+    r = wl.label_bytes(earlier, path.name)
+    assert r.status == wl.LABELED and r.new_data == labeled(path).new_data
+    assert wl.unlabel_bytes(r.new_data).new_data == path.read_bytes()
+
+
+@pytest.mark.parametrize("za, kind", [
+    ("@8.1", "shallow"), ("8.1", "shallow"), ("@sbc", "through"), ("sbc", "through"), ("SBC", "through"),
+    ("@19.5", "through"), ("@25", "through"), ("", "through"), ("@", "through"), ("-0.2", "through"),
+])
+def test_depths(za, kind):
+    assert shapes.routing_depth({"ZA": za}, {}, 19.5) == kind
+
+
+def test_depth_formula_is_unclear():
+    with pytest.raises(shapes.Unclear):
+        shapes.routing_depth({"ZA": "@dz-6"}, {}, 19.5)
+
+
+def test_same_start_and_end_element_is_the_whole_loop():
+    pts = [(0, 0), (900, 0), (900, 400), (0, 400)]
+    data = make_mpr([poly(pts)], [1], 900, 400).replace(b'EE="1:4"', b'EE="1:0"')
+    r = wl.label_bytes(data, "X_1234567_U1.mpr")
+    assert r.info.label == "SIZE 15 3/4 x 35 7/16 | U1"  # not "board - pieces unclear"
+
+
+def test_board_fallback_always_has_room_for_its_label():
+    """When the routing can't be followed, the board's own outline must never block the label."""
+    outer = poly([(0, 0), (900, 0), (900, 400), (0, 400)])
+    r = wl.label_bytes(make_mpr([outer], [(1, ROUTE, {"ZA": "@dz-6"})], 900, 400), "X_1234567_U1.mpr")
+    assert "(BOARD - PIECES UNCLEAR)" in r.info.label
+    assert len(r.drawing) == visible("15 3/4 x 35 7/16") + visible("U1")
+
+
+def test_tiny_cutout_gets_its_size_beside_it():
+    outer = poly([(0, 0), (900, 0), (900, 400), (0, 400)])
+    hole = [(440, 190), (460, 190), (460, 210), (440, 210)]  # 20 mm square: too small to write in
+    r = wl.label_bytes(make_mpr([outer, poly(hole)], [1, 2], 900, 400), "X_1234567_U1.mpr")
+    assert r.info.notes == [] and "(CUTOUTS 13/16 x 13/16)" in r.info.label
+    assert not any(shapes.inside(p, hole) for p in points_of(r.drawing))
+    assert len(r.drawing) == visible("13/16 x 13/16") + visible("CUTOUT") + visible("15 3/4 x 35 7/16") + visible("U1")
+
+
+def test_rounded_corner_cutout_size_is_its_full_size():
+    outer = poly([(0, 0), (900, 0), (900, 400), (0, 400)])
+    # 200 x 100 cutout with 20 mm corner radii (quarter arcs as chords)
+    pts = [(370, 150), (510, 150), (530, 170), (530, 230), (510, 250), (370, 250), (350, 230), (350, 170)]
+    hole = poly(pts, arcs={2, 4, 6, 8})
+    for i in (2, 4, 6, 8):
+        hole[i][1]["R"] = "20"
+    r = wl.label_bytes(make_mpr([outer, hole], [1, 2], 900, 400), "X_1234567_U1.mpr")
+    assert "(CUTOUTS 3 15/16 x 7 1/16)" in r.info.label  # 100 deep x 180 wide
+
+
+@pytest.mark.parametrize("name, unit", [
+    ("WHITE_1234567_SMITH_FS_U1_U2_X2.mpr", "U1 / U2"),
+    ("WHITE_1234567_SMITH_FS_U3_U3_X2.mpr", "U3"),
+    ("WHITE_1234567_SMITH_FS_UNIT_4_U5_X2.mpr", "U4 / U5"),
+])
+def test_several_units_in_a_name(name, unit):
+    assert wl.unit_from_name(name) == unit
+
+
+def test_several_units_are_all_drawn():
+    path = sorted(SAMPLES.glob("WHE_TABBY_*"))[0]
+    name = path.name.replace("_U12_", "_U12_U13_")
+    r = wl.label_bytes(path.read_bytes(), name)
+    assert r.info.label == "SIZE 12 x 95 1/4 | U12 / U13"
+    assert len(r.drawing) == visible("12 x 95 1/4") + visible("U12 / U13")
+
+
+# ---------------------------------------------------------------- no new cuts, ever
+
+
+@pytest.mark.parametrize("path", ALL_PARTS, ids=lambda p: p.name)
+def test_machining_is_identical_after_labeling(path):
+    old, new = lines_of(path.read_bytes()), lines_of(labeled(path).new_data)
+    assert wl.machining_lines(new) == wl.machining_lines(old)
+
+
+def test_save_refuses_a_file_with_new_machining(tmp_path):
+    path = sorted(SAMPLES.glob("WHE_TABBY_*"))[0]
+    f = tmp_path / path.name
+    f.write_bytes(path.read_bytes())
+    r = wl.plan(f)
+    bad = wl.Result(r.status, r.message, r.info,
+                    r.new_data.replace(b"!\r\n", b'<105 \\Konturfraesen\\\r\nEA="1:0"\r\nEE="1:4"\r\n\r\n!\r\n'),
+                    r.old_data, r.drawing)
+    with pytest.raises(wl.LabelError, match="machining"):
+        wl.save(f, bad, tmp_path / "b")
+    assert f.read_bytes() == path.read_bytes()
+
+
+def test_save_puts_the_original_back_if_the_saved_file_is_wrong(tmp_path, monkeypatch):
+    path = sorted(SAMPLES.glob("WHE_TABBY_*"))[0]
+    f = tmp_path / path.name
+    f.write_bytes(path.read_bytes())
+    r = wl.plan(f)
+    real_replace = wl._replace
+    calls = []
+
+    def flaky(target, data):  # the first write lands damaged on disk
+        calls.append(1)
+        real_replace(target, data.replace(b'XA="42"', b'XA="43"', 1) if len(calls) == 1 else data)
+
+    monkeypatch.setattr(wl, "_replace", flaky)
+    with pytest.raises(wl.LabelError, match="put back"):
+        wl.save(f, r, tmp_path / "b")
+    assert f.read_bytes() == path.read_bytes()
+
+
+# ---------------------------------------------------------------- curves traced exactly (radius + turn direction)
+
+
+def arc(outline, i, r, ds):
+    outline[i][1].update({"R": str(r), "DS": str(ds)})
+    return outline
+
+
+def test_arc_points_follow_the_turn_direction():
+    # (600,300) -> (0,300) with radius 500: counter-clockwise bows up to y=400, clockwise down to y=200
+    up = shapes.arc_points((600, 300), (0, 300), 500, True)
+    down = shapes.arc_points((600, 300), (0, 300), 500, False)
+    assert max(y for _, y in up) == pytest.approx(400) and min(y for _, y in up) == pytest.approx(300)
+    assert min(y for _, y in down) == pytest.approx(200)
+    assert up[-1] == (0, 300) and all(math.dist(p, (300, -100)) == pytest.approx(500) for p in up)
+    assert shapes.arc_points((0, 0), (100, 0), 40, True) is None  # radius too small to reach
+
+
+def test_bow_front_with_a_direction_gets_its_size_from_the_outline():
+    outline = arc(poly([(0, 0), (600, 0), (600, 300), (0, 300)], arcs={3}), 3, 500, 1)  # bows out to y=400
+    r = wl.label_bytes(make_mpr([outline], [1], 700, 500), "X_1234567_BOW_U1.mpr")  # blank bigger than the piece
+    (piece,) = r.info.pieces
+    assert r.info.notes == [] and not piece.unknown_curves
+    # 400 deep x 600 wide, from the traced curve; the straight sides numbered, the curve not
+    assert r.info.label == "SIZE 15 3/4 x 23 5/8 (SIDES 23 5/8, 11 13/16, 11 13/16) | U1"
+    assert r.drawing and all_inside(r.drawing, piece.points)
+
+
+def test_scooped_front_with_a_direction_keeps_labels_on_the_wood():
+    outline = arc(poly([(0, 0), (900, 0), (900, 400), (0, 400)], arcs={3}), 3, 1500, 0)  # bows in
+    r = wl.label_bytes(make_mpr([outline], [1], 900, 400), "X_1234567_SCOOP_U1.mpr")
+    (piece,) = r.info.pieces
+    assert r.info.notes == [] and r.drawing and all_inside(r.drawing, piece.points)
+    bulge = 1500 - math.sqrt(1500 ** 2 - 450 ** 2)
+    assert min(y for _, y in piece.points if 1 < _ < 899) == pytest.approx(400 - bulge, abs=0.5)
+
+
+def test_arched_cutout_is_measured_to_the_top_of_the_arch():
+    outer = poly([(0, 0), (1200, 0), (1200, 900), (0, 900)])
+    # fireplace opening: 600 wide, straight sides 300 high, then an arch 100 higher in the middle
+    opening = poly([(300, 200), (900, 200), (900, 500), (300, 500)], arcs={3})
+    arc(opening, 3, 500, 1)  # (900,500) -> (300,500) bows up to y=600
+    r = wl.label_bytes(make_mpr([outer, opening], [1, 2], 1200, 900), "X_1234567_FIREPLACE_U1.mpr")
+    (piece,) = r.info.pieces
+    (cut,) = piece.cutouts
+    assert cut.size_text(wl.inches_text) == "15 3/4 x 23 5/8"  # 400 high x 600 wide, not 300 x 600
+    assert "(CUTOUTS 15 3/4 x 23 5/8)" in r.info.label
+    inside_it = [line for line in r.drawing if all(shapes.inside(p, cut.pts) for p in line)]
+    assert len(inside_it) == visible("15 3/4 x 23 5/8") + visible("CUTOUT")
+
+
+def test_round_cutout_with_a_direction_gets_its_diameter_inside_it():
+    outer = poly([(0, 0), (900, 0), (900, 400), (0, 400)])
+    circle = [("KP", {"X": 400, "Y": 200, "Z": "0.0", "KO": "00"}),
+              ("KA", {"X": 500, "Y": 200, "R": "50", "DS": "1"}), ("KA", {"X": 400, "Y": 200, "R": "50", "DS": "1"})]
+    r = wl.label_bytes(make_mpr([outer, circle], [1, 2], 900, 400), "X_1234567_GROMMET_U1.mpr")
+    (piece,) = r.info.pieces
+    (cut,) = piece.cutouts
+    assert cut.is_round and cut.diameter == pytest.approx(100)
+    assert r.info.label == "SIZE 15 3/4 x 35 7/16 (CUTOUTS 3 15/16 DIA) | U1"
+    near = [line for line in r.drawing if all(math.dist(p, (450, 200)) < 50 for p in line)]
+    assert len(near) == visible("3 15/16 DIA") + visible("CUTOUT")
+    rest = [line for line in r.drawing if line not in near]
+    assert rest and not any(math.dist(p, (450, 200)) < 52 for p in points_of(rest))
+
+
+@pytest.mark.parametrize("ds", [None, "1"])
+def test_lens_shaped_cutout_is_not_round(ds):
+    outer = poly([(0, 0), (900, 0), (900, 400), (0, 400)])
+    extra = {"DS": ds} if ds else {}
+    lens = [("KP", {"X": 400, "Y": 200, "Z": "0.0", "KO": "00"}),
+            ("KA", {"X": 500, "Y": 200, "R": "100", **extra}), ("KA", {"X": 400, "Y": 200, "R": "100", **extra})]
+    r = wl.label_bytes(make_mpr([outer, lens], [1, 2], 900, 400), "X_1234567_U1.mpr")
+    (piece,) = r.info.pieces
+    (cut,) = piece.cutouts
+    assert not cut.is_round and "DIA" not in r.info.label
+
+
+def test_arc_going_the_long_way_round_labels_the_board_and_says_so():
+    outline = poly([(0, 0), (600, 0), (600, 300), (0, 300)], arcs={3})
+    outline[3][1].update({"R": "-500", "DS": "1"})
+    r = wl.label_bytes(make_mpr([outline], [1], 600, 400), "X_1234567_U1.mpr")
+    assert "(BOARD - PIECES UNCLEAR)" in r.info.label and "half way round" in r.message
+
+
+def test_edge_notch_label_stays_on_the_board():
+    outer = poly([(0, 0), (900, 0), (900, 400), (0, 400)])
+    notch = poly([(400, 380), (430, 380), (430, 400), (400, 400)])  # too small to write in
+    r = wl.label_bytes(make_mpr([outer, notch], [1, 2], 900, 400), "X_1234567_U1.mpr")
+    (piece,) = r.info.pieces
+    assert r.info.notes == [] and r.drawing
+    assert all(0 <= x <= 900 and 0 <= y <= 400 for x, y in points_of(r.drawing))
+    assert not any(shapes.inside(p, [(400, 380), (430, 380), (430, 400), (400, 400)]) for p in points_of(r.drawing))
+
+
+def test_labels_beside_cutouts_never_take_the_main_labels_place():
+    outer = poly([(0, 0), (500, 0), (500, 120), (0, 120)])
+    holes = [poly([(x, 55), (x + 10, 55), (x + 10, 65), (x, 65)]) for x in (100, 245, 390)]
+    r = wl.label_bytes(make_mpr([outer, *holes], [1, 2, 3, 4], 500, 120), "X_1234567_U1.mpr")
+    main = visible("4 3/4 x 19 11/16") + visible("U1")
+    assert len(r.drawing) >= main  # the piece's own size is always drawn
+    assert r.info.label.startswith("SIZE 4 3/4 x 19 11/16 (CUTOUTS")
+
+
+def test_same_start_and_end_element_partway_round_is_unclear():
+    pts = [(0, 0), (900, 0), (900, 400), (0, 400)]
+    data = make_mpr([poly(pts)], [1], 900, 400).replace(b'EA="1:0"', b'EA="1:2"').replace(b'EE="1:4"', b'EE="1:2"')
+    r = wl.label_bytes(data, "X_1234567_U1.mpr")
+    assert "(BOARD - PIECES UNCLEAR)" in r.info.label

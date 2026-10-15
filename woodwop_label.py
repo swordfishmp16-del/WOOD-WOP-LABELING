@@ -81,7 +81,10 @@ class PartInfo:
     def size_text(self) -> str:
         """Depth x width of each piece, e.g. '12 x 95 1/4' or '13 x 35 + 13 x 35'."""
         sizes = " + ".join(
-            shapes.piece_size(p, inches_text) + ("" if p.is_rectangle else " (shaped)") for p in self.pieces
+            shapes.piece_size(p, inches_text)
+            + ("" if p.is_rectangle else " (shaped)")
+            + (f" ({len(p.cutouts)} cutout{'s' if len(p.cutouts) > 1 else ''})" if p.cutouts else "")
+            for p in self.pieces
         )
         return sizes + (" (board - pieces unclear)" if self.unclear else "")
 
@@ -133,14 +136,15 @@ def inches_text(mm: float) -> str:
 
 
 def unit_from_name(file_name: str) -> str | None:
-    """The unit a part is for, from its file name.
+    """The unit(s) a part is for, from its file name.
 
     WHE_TABBY_1071128_ROSENBAUM_SHARI_L_CEP_U12_X1.mpr -> 'U12'
     RIST_BAR_OAK_1087516_HIS_L_SHELF_TOP_ES_UNIT_7_X1.mpr -> 'U7'
+    WHITE_1234567_SMITH_FS_U1_U2_X2.mpr -> 'U1 / U2'
 
-    The last unit (``U12``, ``UNIT12`` or ``UNIT_12``) after the job number (the
-    first run of 5+ digits), or anywhere in the name if there's no job number.
-    None if there is none.
+    Every unit (``U12``, ``UNIT12`` or ``UNIT_12``) after the job number (the
+    first run of 5+ digits), or anywhere in the name if there's no job number,
+    in order, each once. None if there are none.
     """
     tokens = [t for t in re.split(r"[_\s-]+", Path(file_name).stem) if t]
     job = next((i for i, t in enumerate(tokens) if re.fullmatch(r"\d{5,}", t)), -1)
@@ -152,7 +156,7 @@ def unit_from_name(file_name: str) -> str | None:
             units.append("U" + m.group(1).upper())
         elif t.upper() == "UNIT" and i + 1 < len(rest) and re.fullmatch(r"\d+[A-Z]?", rest[i + 1], re.IGNORECASE):
             units.append("U" + rest[i + 1].upper())
-    return units[-1] if units else None
+    return " / ".join(dict.fromkeys(units)) or None
 
 
 # ---------------------------------------------------------------- file structure
@@ -537,6 +541,33 @@ def is_label_line(line: str) -> bool:
     )
 
 
+def machining_lines(lines: list[str]) -> list[str]:
+    """Every line that can affect machining, in order: everything except this
+    tool's own label (the LABEL entry, unreferenced drawn label contours, and
+    the first test version's comment) and blank lines.
+
+    Worked out on its own, not with strip_label, so it double-checks it: the
+    original and the labeled file must give exactly the same list.
+    """
+    skip: set[int] = set()
+    for i, line in enumerate(lines):
+        if LABEL_VAR_RE.match(line) and i + 1 < len(lines) and LABEL_KM_RE.match(lines[i + 1]):
+            skip |= {i, i + 1}
+        if line == COMMENT_HEADER:
+            end = block_end(lines, i)
+            kms = [x for x in lines[i + 1 : end] if x.startswith("KM=")]
+            if len(kms) == 1 and LABEL_KM_RE.match(kms[0]):
+                skip |= set(range(i, end))
+    referenced = {n for _, n in contour_refs(lines)}
+    for c in contours(lines):
+        if is_label_contour(c) and c.number not in referenced:
+            skip |= set(range(c.start, c.end))
+    kept = [x for i, x in enumerate(lines) if i not in skip and x != ""]
+    # a variable list holding nothing but the label leaves just its "[001" line
+    return [x for i, x in enumerate(kept)
+            if not (x == "[001" and (i + 1 == len(kept) or kept[i + 1].startswith(SECTION_START)))]
+
+
 def verify(old: bytes, new: bytes, label: str, drawing: list[list[Point]]) -> None:
     """The new file must be the old file plus exactly one label, nothing else.
 
@@ -575,6 +606,8 @@ def verify(old: bytes, new: bytes, label: str, drawing: list[list[Point]]) -> No
 
     if read_size(new_lines) != read_size(old_lines):
         raise LabelError("safety check failed: part size would change")
+    if machining_lines(new_lines) != machining_lines(old_lines):
+        raise LabelError("safety check failed: machining would change")
 
 
 # ---------------------------------------------------------------- files on disk
@@ -610,12 +643,18 @@ def plan(path: Path, remove: bool = False) -> Result:
 def save(path: Path, result: Result, backup_dir: Path) -> None:
     """Back up the original, then replace the file in its own folder.
 
-    Refuses if the file changed since it was read for ``result``.
+    Refuses if the file changed since it was read for ``result``, or if the new
+    file's machining differs from the original's in any way. After saving, the
+    file is read back and checked again; if anything is off, the original is
+    put back.
     """
     assert result.new_data is not None and result.old_data is not None
     original = path.read_bytes()
     if original != result.old_data:
         raise LabelError("file changed since it was checked; check it again")
+    machining = machining_lines(split_lines(original)[0])
+    if machining_lines(split_lines(result.new_data)[0]) != machining:
+        raise LabelError("safety check failed: machining would change; file left alone")
 
     backup_dir.mkdir(parents=True, exist_ok=True)
     backup = backup_dir / path.name
@@ -627,14 +666,23 @@ def save(path: Path, result: Result, backup_dir: Path) -> None:
     if backup.read_bytes() != original:
         raise LabelError("backup copy could not be verified; file left alone")
 
+    _replace(path, result.new_data)
+    saved = path.read_bytes()
+    if saved != result.new_data or machining_lines(split_lines(saved)[0]) != machining:
+        _replace(path, original)
+        if path.read_bytes() != original:
+            raise LabelError(f"file did not save correctly and couldn't be put back; the original is in {backup}")
+        raise LabelError("file did not save correctly; the original was put back")
+
+
+def _replace(path: Path, data: bytes) -> None:
+    """Swap the file's contents in one step, so it's never left half written."""
     tmp = path.with_name(path.name + ".labeling-tmp")
     try:
-        tmp.write_bytes(result.new_data)
+        tmp.write_bytes(data)
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
-    if path.read_bytes() != result.new_data:
-        raise LabelError(f"file did not save correctly; the original is in {backup}")
 
 
 # ---------------------------------------------------------------- command line

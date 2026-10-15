@@ -17,14 +17,19 @@ pieces**, not just the board:
 | Regular rectangle (end panel, shelf) | `12 x 95 1/4` with `U12` under it, centered |
 | Double shelf (two shelves from one board) | each shelf gets its own size, e.g. `13 x 35` on each |
 | L shelf, angled shelf, any other shape | every straight side numbered with its length, just inside that side, plus the overall size and unit in the middle |
-| Curved side | no number (not needed); labels stay clear of the curve |
-| Cutout or edge notch in a piece | not a piece; labels stay clear of it |
-| Closed pocket or shallow routed outline | not a piece; labels stay clear of it |
+| Curved side | no number (not needed); the curve is followed exactly from its radius and direction, so a bow front or an arched opening is measured to the top of the curve |
+| Through cutout or edge notch (e.g. a fireplace opening) | its size with `CUTOUT` under it, inside the cutout (round: diameter over `DIA CUTOUT`), plus the piece's overall size; if the cutout is too small or a piece is cut from inside it, its size goes right beside it |
+| Light groove, pocket or other shallow routing | no size; labels stay clear of the groove line or pocket |
 
 - **Sizes** are depth x width: the piece's front-to-back size (Y in woodWOP)
   first, then side to side (X). Rounded to the nearest 1/16".
-- **Unit** comes from the file name: the last `U12`, `UNIT12` or `UNIT_12`
-  after the job number, shown as `U12`. If there's none, only the size is shown.
+- **Unit** comes from the file name: every `U12`, `UNIT12` or `UNIT_12` after
+  the job number, shown as `U12`. A part listed for more than one unit shows
+  them all, e.g. `U1 / U2`. If there's none, only the size is shown.
+- **Through cut or groove** is read from each route's depth: `sbc` or `@sbc`
+  (spoil board cut, a little past the bottom) or a depth of the full thickness
+  is a through cut; a shallower depth like `@8.1` (8.1 mm down from the top) is a
+  groove.
 - **Text size** shrinks with the piece, from 50 mm (about 2") on big pieces down
   to 3 mm. If there is no room to draw something, the app says so; the sizes are
   still written to the variable list.
@@ -32,8 +37,8 @@ pieces**, not just the board:
   line or only part of an outline, a depth or outline that can't be worked out,
   several curved pieces), the app labels the **board size** instead of guessing.
   The status in the app says why, and the hidden label is marked
-  `(BOARD - PIECES UNCLEAR)`. A single piece with curves gets the board's
-  overall size.
+  `(BOARD - PIECES UNCLEAR)`. A single piece with a curve whose radius or
+  direction isn't in the file gets the board's overall size.
 - A part where an operation points at a contour that isn't in the file is
   reported as a problem and left alone.
 
@@ -82,8 +87,12 @@ A routed label ruins the part. Before any file is saved, the app checks:
 - No operation is added, and every existing operation is byte-for-byte
   unchanged and still cuts exactly the same contour as before.
 - Nothing points at a label contour.
+- Everything that can affect machining (every line except the label's own)
+  is identical to the original. This is worked out a second, separate way.
 
-If any check fails, the file is not written. **Remove Labels** also refuses to
+If any check fails, the file is not written. After saving, the app reads the
+file back and runs the machining check again; if anything is off, it puts the
+original back right away. **Remove Labels** also refuses to
 touch a file where something points at its label.
 
 **Sheet files are checked too.** Any woodNest sheet file in the folder has every
