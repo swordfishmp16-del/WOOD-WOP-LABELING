@@ -20,9 +20,11 @@ Labels (sizes are depth x width = the piece's Y size x its X size):
 - Every cutout: its size (or diameter) with CUTOUT under it, inside the cutout,
   or next to it if it doesn't fit. Labels keep off grooves (the line a shallow
   route follows) and pockets.
-  Curved sides get no number, and labels keep clear of the whole area a curve
-  could bow into (which way it bows isn't read). A single curved piece's
-  overall size is the blank's; several curved pieces fall back to the blank.
+  Curved sides get no number. A curve with a radius and a turn direction is
+  followed exactly. Any other curve (no radius or direction, or one going more
+  than half way round) isn't measured: labels keep clear of the whole area it
+  could bow into, a single piece with one gets the blank's overall size, and
+  several such pieces fall back to the blank.
 """
 
 from __future__ import annotations
@@ -263,9 +265,10 @@ def outline(elements: list[tuple[str, dict[str, str]]],
     """Corner points of a contour, which edges are curved, and the curves whose
     shape isn't known. A curve with a radius (R) and a turn direction (DS: 1 =
     counter-clockwise, 0 = clockwise) is traced in short steps, so the outline
-    follows it exactly. Without both, it's kept as a straight chord and returned
-    in the last list (labels then keep well clear of it). A corner rounding (KR
-    with only a radius) is skipped so the corner stays at its nominal point."""
+    follows it exactly. Without both, or with a negative radius (the long way
+    round), it's kept as a straight chord and returned in the last list (labels
+    then keep well clear of it). A corner rounding (KR with only a radius) is
+    skipped so the corner stays at its nominal point."""
     pts: list[Point] = []
     curved: set = set()
     arcs: list[Arc] = []
@@ -295,10 +298,9 @@ def outline(elements: list[tuple[str, dict[str, str]]],
                     radius = evaluate(values["R"], variables) if "R" in values else None
                 except EvalError:
                     radius = None
-                if radius is not None and radius < 0:  # the long way round: not worked out here
-                    raise EvalError("arc going more than half way round")
                 ds = values.get("DS", "").strip()
-                traced = arc_points(cur, new, radius, ds == "1") if ds in ("0", "1") else None
+                long_way = radius is not None and radius < 0  # more than half way round: not traced
+                traced = arc_points(cur, new, radius, ds == "1") if ds in ("0", "1") and not long_way else None
                 if traced:
                     for q in traced:
                         curved.add(frozenset((_key(cur), _key(q))))
@@ -364,6 +366,19 @@ def _band(a: Point, b: Point, half_width: float, end: float) -> list[Point]:
     return [(ax - nx, ay - ny), (bx - nx, by - ny), (bx + nx, by + ny), (ax + nx, ay + ny)]
 
 
+def _bulge(c: float, radius: float | None) -> tuple[float, float]:
+    """How far an arc over a chord of length c can bow out from the chord, and
+    how far past each end of the chord it can reach. A negative radius is an
+    arc going the long way round; no radius (or one too small for the chord)
+    is taken as up to a half circle."""
+    half = c / 2
+    r = abs(radius) if radius is not None else 0.0
+    if r < half:
+        return half, 0.0
+    h = math.sqrt(r * r - half * half)
+    return (r + h, r - half) if radius < 0 else (r - h, 0.0)
+
+
 def arc_band(a: Point, b: Point, radius: float | None, extra: float = 2.0) -> list[Point]:
     """The area an arc from a to b could cover, bowing either way: a band along
     its chord as wide as the arc's bulge (a half circle's if the radius is
@@ -371,9 +386,8 @@ def arc_band(a: Point, b: Point, radius: float | None, extra: float = 2.0) -> li
     c = math.dist(a, b)
     if c < 0.01:
         return []
-    half = c / 2
-    bulge = radius - math.sqrt(radius * radius - half * half) if radius and radius >= half else half
-    return _band(a, b, bulge + extra, extra)
+    bulge, past = _bulge(c, radius)
+    return _band(a, b, bulge + extra, past + extra)
 
 
 def path_bands(raw: list[Point], curved: set, arcs: list["Arc"], half_width: float = GROOVE_HALF) -> list[list[Point]]:
@@ -394,10 +408,13 @@ def arc_extremes(a: Point, b: Point, radius: float | None) -> list[Point]:
     c = math.dist(a, b)
     if c < 0.01:
         return []
-    half = c / 2
-    bulge = radius - math.sqrt(radius * radius - half * half) if radius and radius >= half else half
+    bulge, past = _bulge(c, radius)
     mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
     nx, ny = -(b[1] - a[1]) / c * bulge, (b[0] - a[0]) / c * bulge
+    if past:  # a long-way-round arc also reaches past both ends of its chord
+        ux, uy = (b[0] - a[0]) / c, (b[1] - a[1]) / c
+        a_end, b_end = (a[0] - ux * past, a[1] - uy * past), (b[0] + ux * past, b[1] + uy * past)
+        return [(mx + nx, my + ny), (mx - nx, my - ny), a_end, b_end]
     return [(mx + nx, my + ny), (mx - nx, my - ny)]
 
 

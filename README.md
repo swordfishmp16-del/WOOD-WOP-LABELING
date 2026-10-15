@@ -38,7 +38,8 @@ pieces**, not just the board:
   several curved pieces), the app labels the **board size** instead of guessing.
   The status in the app says why, and the hidden label is marked
   `(BOARD - PIECES UNCLEAR)`. A single piece with a curve whose radius or
-  direction isn't in the file gets the board's overall size.
+  direction isn't in the file, or a curve going more than half way round,
+  gets the board's overall size, and the labels keep clear of the curve.
 - A part where an operation points at a contour that isn't in the file is
   reported as a problem and left alone.
 

@@ -646,11 +646,18 @@ def test_lens_shaped_cutout_is_not_round(ds):
     assert not cut.is_round and "DIA" not in r.info.label
 
 
-def test_arc_going_the_long_way_round_labels_the_board_and_says_so():
-    outline = poly([(0, 0), (600, 0), (600, 300), (0, 300)], arcs={3})
-    outline[3][1].update({"R": "-500", "DS": "1"})
-    r = wl.label_bytes(make_mpr([outline], [1], 600, 400), "X_1234567_U1.mpr")
-    assert "(BOARD - PIECES UNCLEAR)" in r.info.label and "half way round" in r.message
+def test_arc_going_the_long_way_round_gets_the_overall_size_and_labels_stay_clear():
+    """A rounded end going more than half way round isn't measured: the piece gets
+    the blank's overall size, and labels keep clear of everywhere the curve could go."""
+    outline = poly([(0, 0), (700, 0), (700, 100), (700, 300), (0, 300)], arcs={3})  # (700,100) -> (700,300)
+    outline[3][1].update({"R": "-110", "DS": "1"})  # bulges about 156 mm out from x=700
+    r = wl.label_bytes(make_mpr([outline], [1], 900, 400), "X_1234567_U1.mpr")
+    (piece,) = r.info.pieces
+    assert "UNCLEAR" not in r.info.label and r.info.notes == []
+    assert r.info.label.startswith("SIZE 15 3/4 x 35 7/16")  # the 400 x 900 blank
+    assert len([line for line in r.drawing if all(p[0] < 690 for p in line)]) >= visible("15 3/4 x 35 7/16")
+    reach = 110 + math.sqrt(110 ** 2 - 100 ** 2)
+    assert not any(x > 700 - reach - 2 and 100 - 12 < y < 300 + 12 for x, y in points_of(r.drawing))
 
 
 def test_edge_notch_label_stays_on_the_board():
